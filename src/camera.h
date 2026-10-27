@@ -7,13 +7,16 @@ class Camera {
     std::thread thread_;
     std::atomic<bool> stop_{true};
     void read();
-public:
+
+  public:
     Frames frames;
     VideoMode mode;
     std::wstring name;
-    ~Camera() { shutdown(); }
+    ~Camera() {
+        shutdown();
+    }
     static std::vector<Device> devices();
-    void start(const std::wstring& id);
+    void start(const std::wstring &id);
     void shutdown();
 };
 } // namespace youcam

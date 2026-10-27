@@ -7,13 +7,14 @@ class Movie {
     DWORD video_ = 0, audio_ = 0;
     uint32_t width_ = 0, height_ = 0;
     bool audioEnabled_ = false;
-    void open(const std::filesystem::path&, uint32_t, uint32_t, bool, bool, bool);
-    void sample(DWORD stream, const void* data, size_t bytes, int64_t timestamp, int64_t duration);
-public:
+    void open(const std::filesystem::path &, uint32_t, uint32_t, bool, bool, bool);
+    void sample(DWORD stream, const void *data, size_t bytes, int64_t timestamp, int64_t duration);
+
+  public:
     std::wstring codec;
-    void start(const std::filesystem::path&, uint32_t, uint32_t, bool audio);
-    void video(const Frame&, int64_t timestamp, int64_t duration);
-    void audio(const std::vector<int16_t>&, int64_t timestamp);
+    void start(const std::filesystem::path &, uint32_t, uint32_t, bool audio);
+    void video(const Frame &, int64_t timestamp, int64_t duration);
+    void audio(const std::vector<int16_t> &, int64_t timestamp);
     void finish();
 };
 enum class Phase { Idle, Starting, Recording, Paused, Saving };
@@ -27,7 +28,10 @@ struct RecordingState {
     int64_t elapsed = 0;
 };
 class Recorder {
-    struct AudioPacket { std::vector<int16_t> samples; int64_t time; };
+    struct AudioPacket {
+        std::vector<int16_t> samples;
+        int64_t time;
+    };
     mutable std::mutex mutex_;
     std::condition_variable condition_;
     std::thread thread_;
@@ -38,12 +42,15 @@ class Recorder {
     uint64_t serial_ = 0;
     std::deque<AudioPacket> audio_;
     size_t queuedSamples_ = 0;
-    void run(Source, Frames*, bool, std::filesystem::path);
-public:
-    ~Recorder() { stop(); }
-    void start(Source, Frames* camera, bool audio, const std::filesystem::path&);
-    void stop(const std::string& error = "");
-    void pause(const std::string& reason = "");
+    void run(Source, Frames *, bool, std::filesystem::path);
+
+  public:
+    ~Recorder() {
+        stop();
+    }
+    void start(Source, Frames *camera, bool audio, const std::filesystem::path &);
+    void stop(const std::string &error = "");
+    void pause(const std::string &reason = "");
     void resume();
     void audio(std::vector<int16_t>, int64_t timestamp);
     RecordingState state() const;

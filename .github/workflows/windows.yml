@@ -30,3 +30,9 @@ jobs:
             LICENSE
             README.md
           retention-days: 14
+      - name: Inspect executable dependencies
+        shell: pwsh
+        run: |
+          $dumpbin = Get-ChildItem "${env:ProgramFiles}\Microsoft Visual Studio\*\*\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Select-Object -Last 1
+          if (-not $dumpbin) { throw "MSVC dumpbin was not found" }
+          & $dumpbin.FullName /dependents build/Release/YouCam.exe

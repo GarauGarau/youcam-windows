@@ -7,8 +7,10 @@
 namespace youcam {
 class App {
     HINSTANCE instance_;
+    HFONT panelFont_ = nullptr;
     HWND overlay_ = nullptr, panel_ = nullptr, picker_ = nullptr, editor_ = nullptr, editorTools_ = nullptr;
-    HWND status_ = nullptr, details_ = nullptr, notice_ = nullptr, record_ = nullptr, pause_ = nullptr, gain_ = nullptr, meter_ = nullptr;
+    HWND status_ = nullptr, details_ = nullptr, notice_ = nullptr, record_ = nullptr, pause_ = nullptr,
+         gain_ = nullptr, meter_ = nullptr;
     HWND sourceButton_ = nullptr;
     NOTIFYICONDATAW tray_{};
     Camera camera_;
@@ -31,18 +33,18 @@ class App {
     uint64_t shownCompletion_ = 0;
     bool shortcuts_ = false;
     bool preview_ = false;
-    std::wstring setting(const wchar_t*, const wchar_t* fallback = L"");
+    std::wstring setting(const wchar_t *, const wchar_t *fallback = L"");
     void saveSettings();
     void initialize();
     void update();
-    void error(const std::string&);
+    void error(const std::string &);
     void showPanel(bool show = true);
     void layoutPanel();
     void menu(POINT, bool sourceOnly = false);
     void command(int);
     bool allowSourceChange();
     void selectSource(Source);
-    void selectCamera(const std::wstring&);
+    void selectCamera(const std::wstring &);
     void syncMicrophone();
     void toggleRecording();
     void togglePause();
@@ -52,10 +54,11 @@ class App {
     void resizeCamera(int width);
     void paintCamera(HDC);
     void paintRegion(HWND, HDC);
-    void notify(const std::wstring&);
+    void notify(const std::wstring &);
     static LRESULT CALLBACK procedure(HWND, UINT, WPARAM, LPARAM);
     LRESULT dispatch(HWND, UINT, WPARAM, LPARAM);
-public:
+
+  public:
     explicit App(HINSTANCE, bool preview = false);
     ~App();
     int run();

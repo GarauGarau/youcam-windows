@@ -10,17 +10,27 @@ struct Source {
     std::wstring name;
     bool mirror = false;
 };
-struct Monitor { HMONITOR handle; RECT rect, work; std::wstring name; };
-struct Window { HWND handle; std::wstring name; };
+struct Monitor {
+    HMONITOR handle;
+    RECT rect, work;
+    std::wstring name;
+};
+struct Window {
+    HWND handle;
+    std::wstring name;
+};
 std::vector<Monitor> monitors();
 std::vector<Window> windows();
 class DesktopCapture {
     struct State;
     std::shared_ptr<State> state_;
-public:
+
+  public:
     std::shared_ptr<Frames> frames = std::make_shared<Frames>();
-    ~DesktopCapture() { stop(); }
-    void start(const Source& source);
+    ~DesktopCapture() {
+        stop();
+    }
+    void start(const Source &source);
     void stop();
 };
 } // namespace youcam
