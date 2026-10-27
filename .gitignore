@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.build/
+build/
+dist/
+*.mov
+*.mp4
+.youcam-*/

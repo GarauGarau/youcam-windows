@@ -1,0 +1,24 @@
+name: Windows checks
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: conda-incubator/setup-miniconda@fc2d68f6413eb2d87b895e92f8584b5b94a10167 # v3
+        with:
+          miniforge-version: latest
+          activate-environment: youcam-windows
+          environment-file: environment.yml
+          auto-activate-base: false
+      - name: Unit tests and encoding smoke test
+        shell: cmd
+        run: call test.cmd
+      - name: Native window, screen and hotkey checks
+        shell: cmd
+        run: call test-native.cmd

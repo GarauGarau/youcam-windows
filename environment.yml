@@ -1,0 +1,10 @@
+name: youcam-windows
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.12
+  - pip
+  - ffmpeg=7.1.*=gpl_*
+  - pip:
+      - -r requirements.txt
