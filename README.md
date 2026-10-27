@@ -1,87 +1,72 @@
-# YouCam per Windows
+# YouCam — Windows nativo
 
-Webcam flottante e registratore dello schermo per **Windows 11 x64**. Si esegue dai sorgenti con Miniforge: niente installer, compilatore C/C++ o privilegi amministrativi.
+Webcam flottante e registratore per **Windows 11 x64**, scritto in C++ con le API di Windows. Sorgenti disponibili, nessun installer e nessuna dipendenza da Python, Qt, Miniforge o FFmpeg. Il programma usa Win32, Windows Graphics Capture, Media Foundation e WASAPI.
 
-Port indipendente di [YouCam di antirez](https://github.com/antirez/youcam), a partire dal port locale Python/Qt per Linux. Conserva la licenza MIT e l'attribuzione originali. Non è una versione Windows ufficiale di antirez.
+Port indipendente ispirato a [YouCam di antirez](https://github.com/antirez/youcam). Conserva licenza MIT, attribuzione e impostazione essenziale dell'originale: un piccolo strumento locale, moduli diretti, API di sistema, nessun servizio, account applicativo o telemetria. Non è una release ufficiale di antirez. I commenti spiegano soprattutto i vincoli delle API e le scelte che non sono evidenti dal codice.
 
-## Preparazione e avvio
+## Compilazione e avvio
 
-Scarica i sorgenti o clona questa repository privata sul PC Windows. Apri **Miniforge Prompt**, entra nella cartella e lancia:
+Installa **Microsoft C++ Build Tools**, selezionando **Sviluppo desktop con C++**, **Windows SDK** e **strumenti CMake per Windows**. Non serve l'IDE completo di Visual Studio. Apri il Developer Command Prompt nella cartella del progetto:
 
 ```bat
-cd /d "%USERPROFILE%\Desktop\youcam-windows"
-setup.cmd
+build.cmd
 run.cmd
 ```
 
-Usa il percorso effettivo se il Desktop è in OneDrive o in un'altra posizione. `setup.cmd` va eseguito una sola volta: crea l'ambiente separato `youcam-windows`, con Python 3.12, FFmpeg e tre dipendenze Python (PySide6, NumPy, MSS). L'installazione iniziale richiede Internet; l'applicazione funziona localmente.
+Il risultato è `build\Release\YouCam.exe`. Puoi avviarlo direttamente con doppio clic o copiarlo sul PC Windows insieme a questa documentazione e alla licenza. Il runtime C++ è collegato staticamente; l'app usa poi le librerie multimediali presenti in Windows. Su Windows N può essere necessario il Media Feature Pack.
 
-Per gli avvii successivi basta `run.cmd` da Miniforge Prompt. In alternativa:
-
-```bat
-conda activate youcam-windows
-python -m youcam
-```
-
-Non serve una compilazione nativa dell'applicazione: il codice Python è eseguito direttamente e le librerie sono distribuite già compilate. Modifica i sorgenti e riavvia. Dopo un aggiornamento delle dipendenze:
+Per ricompilare dopo una modifica basta ripetere `build.cmd`. Miniforge non serve. I comandi equivalenti sono:
 
 ```bat
-conda env update --file environment.yml --prune
+cmake -S . -B build -A x64
+cmake --build build --config Release --parallel
 ```
+
+## Risoluzione
+
+La **webcam** viene aperta alla risoluzione più alta dichiarata dal driver: prima si confronta il numero di pixel, poi il frame rate. Si provano le rappresentazioni disponibili a quella risoluzione, senza scendere silenziosamente a una modalità inferiore. Le dimensioni scelte sono visibili nel pannello. Il ridimensionamento della webcam flottante modifica soltanto l'anteprima; **Camera only** registra sempre il fotogramma intero alla risoluzione acquisita. Se la webcam compare dentro una registrazione dello schermo, viene naturalmente registrata con la dimensione visibile sullo schermo.
+
+Lo **schermo** viene acquisito nei pixel fisici della modalità attiva di Windows. Un monitor impostato a 3840×2160 viene registrato a 3840×2160 anche con scaling al 150% o al 200%. L'app non cambia la modalità del monitor: per usare una modalità superiore, impostala prima nelle impostazioni Schermo di Windows. Una **regione** mantiene esattamente i propri pixel fisici.
+
+Non c'è un limite artificiale a 4096 pixel. H.264 e, se disponibile, HEVC vengono provati attraverso gli encoder di sistema con accelerazione hardware consentita. La disponibilità effettiva della GPU dipende dagli encoder installati e dal driver. Se nessun encoder accetta le dimensioni richieste, la registrazione segnala l'errore: **non riduce la risoluzione**. Le dimensioni dispari ricevono al massimo una riga/colonna di padding, senza tagliare pixel originali.
+
+I video sono **MP4**, normalmente H.264 con audio AAC mono a 48 kHz, fino a 30 fotogrammi al secondo. Conservare la risoluzione non significa compressione senza perdita. Il bitrate cresce con il numero di pixel. Prestazioni e supporto delle modalità molto grandi vanno verificati sulla macchina reale.
 
 ## Uso
 
-- Trascina la webcam per spostarla; usa la rotellina per ridimensionarla. Clic destro sulla webcam o icona nella tray per il menu. Cerchio, quadrato e rettangolo 16:9.
-- **Recording Source → Select Area…** seleziona una regione di un monitor. Gli angoli bianchi la ridimensionano; **Move** la sposta. **Esc** annulla una nuova selezione conservando la precedente. Sono disponibili anche intero schermo e scelta del monitor.
-- **Window** registra il contenuto della singola finestra, senza cornice, desktop o webcam flottante. La finestra può essere spostata, coperta e ridimensionata; il filmato conserva le dimensioni iniziali con eventuali bande nere. Minimizzarla o nasconderla mette in pausa: ripristinala e premi **Resume**. Chiuderla interrompe la registrazione e salva i fotogrammi già acquisiti. Il cambio sorgente durante la registrazione propone di salvare prima il video corrente.
-- **Camera Only (Full Frame)** registra tutta l'immagine della webcam, con il microfono scelto. **Hide Camera Preview** nasconde solo l'anteprima. La specchiatura si applica anche al filmato.
-- **Audio Input** sceglie microfono, guadagno e indicatore di livello. L'audio di sistema non viene registrato.
-- **Ctrl+Alt+Shift+R** avvia/ferma; **Ctrl+Alt+Shift+P** mette in pausa/riprende. Se la combinazione è occupata, usa il menu o il pannello.
-- I video H.264/AAC `.mov` vengono salvati sul Desktop individuato da Windows, incluso un Desktop reindirizzato su OneDrive. L'area e la webcam scelte vengono ricordate; le finestre vanno scelte nuovamente dopo il riavvio.
+- Trascina la webcam per spostarla; usa la rotellina per ridimensionarla. Clic destro o icona nella tray per il menu. Sono disponibili cerchio, quadrato e rettangolo 16:9, con specchiatura.
+- **Recording source** sceglie monitor, area, finestra o **Camera only (full frame)**. In modalità solo webcam, **Hide camera preview** nasconde l'anteprima e continua a registrare.
+- **Select area…** permette di disegnare una regione su un singolo monitor. **Esc** annulla. Prima di registrare, trascina gli angoli per ridimensionarla o la barra **Move** per spostarla; i pulsanti accanto all'area permettono di selezionarla nuovamente o tornare allo schermo intero.
+- La registrazione di una **finestra** usa Windows Graphics Capture e non include le finestre che la coprono. L'area client esclude la cornice quando il sistema ne fornisce la geometria corrispondente. Se ridimensioni la finestra, il video mantiene le dimensioni iniziali e adatta il contenuto con eventuali bande. Minimizzarla/nasconderla mette in pausa; ripristinala e premi **Resume**. Chiuderla interrompe e tenta di salvare i fotogrammi già acquisiti.
+- Cambiare sorgente durante la registrazione propone di salvare prima il video corrente. Una modifica della risoluzione del monitor richiede una nuova registrazione.
+- **Audio input** sceglie il microfono. Il pannello offre guadagno da −36 a +12 dB e indicatore di livello. L'audio di sistema non viene registrato.
+- **Ctrl+Alt+Shift+R** avvia/ferma; **Ctrl+Alt+Shift+P** mette in pausa/riprende. Se un'altra applicazione occupa una combinazione, usa i pulsanti o il menu.
+- I file `YouCam-<data>-<ora>.mp4` si salvano sul Desktop indicato da Windows, anche se reindirizzato su OneDrive. Le preferenze sono in `%LOCALAPPDATA%\YouCamNative\settings.ini`.
 
-Windows esclude i controlli di YouCam dalla cattura tramite `SetWindowDisplayAffinity`; la webcam rimane visibile nei video dello schermo. Se Windows rifiuta l'esclusione, menu e pannello usano l'immagine dello sfondo precedente alla loro apertura: sotto quel controllo lo sfondo rimane fermo finché viene chiuso.
+Pannello e guide vengono esclusi dalla cattura tramite l'API nativa di Windows. Windows può mostrare il bordo di sistema attorno alla sorgente acquisita. Contenuti protetti, sessioni bloccate e desktop sicuri non sono sorgenti normalmente registrabili. Questa versione produce video SDR; la gestione colore HDR non è implementata.
 
-La cattura delle finestre usa `PrintWindow` con `PW_RENDERFULLCONTENT`. Alcune applicazioni con rendering particolare o contenuti protetti possono restituire immagini nere o incomplete: in questi casi usa schermo/area. Una chiamata bloccata viene interrotta dal punto di vista del registratore dopo tre secondi. La cattura non ripiega automaticamente sul desktop, per evitare di includere altre finestre.
+In **Impostazioni → Privacy e sicurezza → Fotocamera / Microfono**, consenti l'accesso alle applicazioni desktop. Se una periferica è occupata, chiudi l'altra app e usa **Retry camera**. Un errore nella modalità massima della webcam può dipendere da driver, formato o collegamento USB; il programma lo segnala senza passare a una risoluzione minore.
 
-## GPU AMD e periferiche
-
-Con `YOUCAM_ENCODER=auto` (predefinito), viene provata una vera codifica H.264 tramite AMD AMF; se non riesce, viene usato x264 sulla CPU. La disponibilità dipende sia dal driver Radeon sia dalla build di FFmpeg. Per forzare una scelta nella sessione corrente:
-
-```bat
-set YOUCAM_ENCODER=software
-run.cmd
-```
-
-Usa `amf` per richiedere esplicitamente la GPU, oppure `auto` per ripristinare la scelta automatica. Se una diversa build di FFmpeg è necessaria, `YOUCAM_FFMPEG` può indicare il percorso completo del suo `ffmpeg.exe`.
-
-In **Impostazioni → Privacy e sicurezza → Fotocamera / Microfono**, consenti l'accesso alle applicazioni desktop. Se una periferica è occupata, chiudi l'altra applicazione e scegli **Retry Camera**. La prova sul PC Windows con webcam, microfono e Radeon reali rimane necessaria: i test automatici con periferiche sintetiche non la sostituiscono.
-
-## Verifiche
+## Test
 
 ```bat
 test.cmd
-test-native.cmd
-run.cmd --smoke-test
 ```
 
-`test.cmd` controlla geometria, interfaccia, guadagno, gestione sorgenti e filmati realmente codificati/decodificati, inclusa pausa/ripresa. Usa rendering senza schermo e codifica software.
+I test portabili verificano scelta della risoluzione massima, dimensioni 8K, conservazione dei pixel nelle immagini dispari, specchiatura, conversione NV12 e continuità temporale dopo le pause. I test Windows codificano e decodificano video con Media Foundation, incluso un filmato 3840×2160, e verificano audio AAC e dimensioni del file salvato. Quando Windows Graphics Capture è disponibile, provano anche monitor, regione, finestra e minimizzazione/ripresa. Una prova di avvio usa una webcam sintetica.
 
-`test-native.cmd` apre una finestra di prova su un desktop Windows attivo e verifica cattura dietro altre finestre, ridimensionamento, minimizzazione/ripresa, salvataggio, esclusione dei controlli e registrazione/rilascio delle scorciatoie. Non richiede webcam. Durante questi test lascia il desktop sbloccato e attendi la chiusura delle finestre di prova.
+GitHub Actions compila e verifica il progetto su un runner Windows Server. Il runner non verifica la webcam fisica o gli encoder AMD del tuo Windows 11. Sul PC reale controlla la risoluzione mostrata nel pannello e quella del file salvato, oltre a video, microfono, pausa/ripresa e acquisizione con scaling del monitor attivo.
 
-`run.cmd --smoke-test` verifica disegno dell'overlay e codifica H.264/AAC con l'encoder selezionato, senza registrare il desktop o la webcam. I test Windows vengono eseguiti anche da GitHub Actions; il runner usa Windows Server e non verifica la GPU AMD del tuo PC.
+Su Linux si possono eseguire solo i test della logica indipendente dal sistema:
 
-## Impostazione del codice
+```sh
+cmake -S . -B .build/core
+cmake --build .build/core
+ctest --test-dir .build/core --output-on-failure
+```
 
-Lo spirito del progetto originale resta quello di un piccolo strumento locale e leggibile:
+## Sorgenti
 
-- una funzione precisa: webcam sopra lo schermo e registrazione, con controlli essenziali;
-- nessun servizio, account applicativo, telemetria o aggiornamento automatico;
-- moduli Python diretti, senza framework aggiuntivi di packaging o architetture a plugin;
-- tre dipendenze Python e FFmpeg; le chiamate Windows usano `ctypes` della libreria standard;
-- commenti che spiegano le scelte e i vincoli, soprattutto coordinate DPI, handle nativi e acquisizione bloccante.
+`app.cpp` gestisce l'interfaccia Win32; `camera.cpp` negozia la modalità massima della webcam; `audio.cpp` acquisisce il microfono tramite WASAPI; `capture.cpp` riceve le superfici di Windows Graphics Capture; `recorder.cpp` produce l'MP4 con Media Foundation; `core.h` raccoglie le piccole operazioni verificabili senza Windows.
 
-Il progetto macOS originale usa le API del sistema senza dipendenze esterne. Qui Qt e FFmpeg sono un compromesso esplicito per riutilizzare il port Python e avviare dai sorgenti con Miniforge. L'attenzione ai commenti segue anche quanto descritto da antirez in [Writing system software: code comments](https://antirez.com/news/124).
-
-`app.py` collega i controlli; `camera.py` e `audio.py` gestiscono le periferiche; `recorder.py` scrive segmenti FFmpeg; `sources.py` acquisisce le finestre; `win32.py` contiene le firme delle API native; `display.py` converte le coordinate logiche in pixel. I sorgenti sono nella cartella `youcam/`, le verifiche in `tests/`.
-
-[Licenza MIT](LICENSE).
+La precedente implementazione Python è stata rimossa dall'albero corrente del progetto. [Licenza MIT](LICENSE).

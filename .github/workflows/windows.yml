@@ -1,4 +1,4 @@
-name: Windows checks
+name: Native Windows checks
 on:
   push:
   workflow_dispatch:
@@ -10,17 +10,14 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: conda-incubator/setup-miniconda@fc2d68f6413eb2d87b895e92f8584b5b94a10167 # v3
-        id: environment
-        with:
-          miniforge-version: latest
-          activate-environment: youcam-windows
-          environment-file: environment.yml
-          auto-activate-base: false
-      - name: Unit tests and encoding smoke test
-        shell: cmd
-        run: call test.cmd
-      - name: Native window, screen and hotkey checks
-        if: ${{ !cancelled() && steps.environment.outcome == 'success' }}
-        shell: cmd
-        run: call test-native.cmd
+      - name: Enable Windows multimedia components on Server runner
+        shell: pwsh
+        run: |
+          $feature = Get-WindowsFeature Server-Media-Foundation -ErrorAction SilentlyContinue
+          if ($feature -and -not $feature.Installed) { Install-WindowsFeature Server-Media-Foundation }
+      - name: Configure and compile native C++
+        run: |
+          cmake -S . -B build -A x64
+          cmake --build build --config Release --parallel
+      - name: Test native capture and full-resolution encoding
+        run: ctest --test-dir build -C Release --output-on-failure -V
