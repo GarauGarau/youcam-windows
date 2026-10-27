@@ -10,14 +10,23 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Configure and compile native C++
+        run: |
+          cmake -S . -B build -A x64
+          cmake --build build --config Release --parallel
       - name: Enable Windows multimedia components on Server runner
         shell: pwsh
         run: |
           $feature = Get-WindowsFeature Server-Media-Foundation -ErrorAction SilentlyContinue
           if ($feature -and -not $feature.Installed) { Install-WindowsFeature Server-Media-Foundation }
-      - name: Configure and compile native C++
-        run: |
-          cmake -S . -B build -A x64
-          cmake --build build --config Release --parallel
       - name: Test native capture and full-resolution encoding
         run: ctest --test-dir build -C Release --output-on-failure -V
+      - name: Save native executable
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: YouCam-native-windows-x64
+          path: |
+            build/Release/YouCam.exe
+            LICENSE
+            README.md
+          retention-days: 14

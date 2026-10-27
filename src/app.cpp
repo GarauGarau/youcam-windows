@@ -191,17 +191,18 @@ void App::update() {
     SendMessageW(meter_, PBM_SETPOS, WPARAM(std::min(1.0f, microphone_.peak.load()) * 100), 0);
     if (state.phase != previousPhase_) {
         if (state.phase == Phase::Paused && !state.notice.empty()) notify(wide(state.notice));
-        if (state.phase == Phase::Idle && previousPhase_ != Phase::Idle) {
-            auto message = wide(state.error);
-            if (!state.saved.empty()) message += (message.empty() ? L"" : L"\n") + std::wstring(L"Saved: ") + state.saved.wstring();
-            if (!message.empty()) notify(message);
-            showEditor();
-        }
         previousPhase_ = state.phase; syncMicrophone();
+    }
+    if (state.phase == Phase::Idle && state.serial != shownCompletion_) {
+        shownCompletion_ = state.serial;
+        auto message = wide(state.error);
+        if (!state.saved.empty()) message += (message.empty() ? L"" : L"\n") + std::wstring(L"Saved: ") + state.saved.wstring();
+        if (!message.empty()) notify(message);
+        showEditor();
     }
     if (busy && micRunning_) {
         auto failure = microphone_.error();
-        if (!failure.empty()) { recorder_.stop(); notify(L"Microphone stopped: " + wide(failure)); }
+        if (!failure.empty()) recorder_.stop("Microphone stopped: " + failure);
     }
 }
 void App::menu(POINT position, bool sourceOnly) {

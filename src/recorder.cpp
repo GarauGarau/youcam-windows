@@ -104,7 +104,7 @@ RecordingState Recorder::state() const {
 void Recorder::start(Source source, Frames* camera, bool audio, const std::filesystem::path& path) {
     if (state().phase != Phase::Idle) return;
     if (thread_.joinable()) thread_.join();
-    { std::lock_guard lock(mutex_); state_ = {}; state_.phase = Phase::Starting; state_.source = source.name; timeline_.start(clock100ns()); stop_ = false; audio_.clear(); queuedSamples_ = 0; }
+    { std::lock_guard lock(mutex_); state_ = {}; state_.serial = ++serial_; state_.phase = Phase::Starting; state_.source = source.name; timeline_.start(clock100ns()); stop_ = false; audio_.clear(); queuedSamples_ = 0; }
     thread_ = std::thread([this, source, camera, audio, path] { run(source, camera, audio, path); });
 }
 void Recorder::pause(const std::string& reason) {
@@ -117,8 +117,8 @@ void Recorder::resume() {
     if (state_.phase != Phase::Paused) return;
     activeSince_ = clock100ns(); timeline_.resume(activeSince_); state_.phase = Phase::Recording; state_.notice.clear(); condition_.notify_all();
 }
-void Recorder::stop() {
-    { std::lock_guard lock(mutex_); stop_ = true; condition_.notify_all(); }
+void Recorder::stop(const std::string& error) {
+    { std::lock_guard lock(mutex_); stop_ = true; if (!error.empty()) state_.error = error; condition_.notify_all(); }
     if (thread_.joinable()) thread_.join();
 }
 void Recorder::audio(std::vector<int16_t> samples, int64_t timestamp) {

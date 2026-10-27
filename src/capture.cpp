@@ -55,7 +55,7 @@ struct DesktopCapture::State {
             if (!captured) return;
             auto content = captured.ContentSize();
             if (content.Width <= 0 || content.Height <= 0) return;
-            auto access = captured.Surface().as<IDirect3DDxgiInterfaceAccess>();
+            auto access = captured.Surface().as<::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
             ComPtr<ID3D11Texture2D> texture;
             check(access->GetInterface(IID_PPV_ARGS(&texture)), "Read capture texture");
             D3D11_TEXTURE2D_DESC description{}; texture->GetDesc(&description);
@@ -117,6 +117,11 @@ void DesktopCapture::start(const Source& source) {
             check(factory->CreateForWindow(source.window, winrt::guid_of<GraphicsCaptureItem>(), winrt::put_abi(state->item)), "Select window capture");
         else check(factory->CreateForMonitor(source.monitor, winrt::guid_of<GraphicsCaptureItem>(), winrt::put_abi(state->item)), "Select monitor capture");
         state->size = state->item.Size();
+        if (source.kind == SourceKind::Screen || source.kind == SourceKind::Region) {
+            MONITORINFO monitor{sizeof(monitor)};
+            if (!GetMonitorInfoW(source.monitor, &monitor) || state->size.Width != rectWidth(monitor.rcMonitor) || state->size.Height != rectHeight(monitor.rcMonitor))
+                throw std::runtime_error("Windows did not provide the monitor's full physical resolution. Recording was not started.");
+        }
         state->pool = Direct3D11CaptureFramePool::CreateFreeThreaded(state->winDevice, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, state->size);
         state->session = state->pool.CreateCaptureSession(state->item);
         std::weak_ptr<State> weak = state;

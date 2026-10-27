@@ -10,16 +10,16 @@ std::shared_ptr<const Frame> awaitFrame(Frames& frames) {
 }
 void inspectMovie(const std::filesystem::path& path, UINT32 width, UINT32 height, bool audio) {
     ComPtr<IMFSourceReader> reader; check(MFCreateSourceReaderFromURL(path.c_str(),nullptr,&reader),"Open saved MP4");
-    ComPtr<IMFMediaType> type; check(reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM,&type),"Read saved video metadata");
+    ComPtr<IMFMediaType> type; check(reader->GetCurrentMediaType(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM),&type),"Read saved video metadata");
     UINT32 actualW=0,actualH=0; check(MFGetAttributeSize(type.Get(),MF_MT_FRAME_SIZE,&actualW,&actualH),"Read saved video dimensions");
     require(actualW==width && actualH==height,"Encoded video lost source resolution.");
-    if (audio) { ComPtr<IMFMediaType> sound; check(reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM,&sound),"Read saved microphone stream"); }
+    if (audio) { ComPtr<IMFMediaType> sound; check(reader->GetCurrentMediaType(DWORD(MF_SOURCE_READER_FIRST_AUDIO_STREAM),&sound),"Read saved microphone stream"); }
     ComPtr<IMFMediaType> decoded; MFCreateMediaType(&decoded); decoded->SetGUID(MF_MT_MAJOR_TYPE,MFMediaType_Video); decoded->SetGUID(MF_MT_SUBTYPE,MFVideoFormat_NV12);
-    check(reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM,nullptr,decoded.Get()),"Configure native video decoder");
-    reader->SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS,FALSE); reader->SetStreamSelection(MF_SOURCE_READER_FIRST_VIDEO_STREAM,TRUE);
+    check(reader->SetCurrentMediaType(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM),nullptr,decoded.Get()),"Configure native video decoder");
+    reader->SetStreamSelection(DWORD(MF_SOURCE_READER_ALL_STREAMS),FALSE); reader->SetStreamSelection(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM),TRUE);
     int count=0;
     for (;;) { ComPtr<IMFSample> sample; DWORD flags=0; LONGLONG t=0;
-        check(reader->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM,0,nullptr,&flags,&t,&sample),"Decode saved video");
+        check(reader->ReadSample(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM),0,nullptr,&flags,&t,&sample),"Decode saved video");
         if (sample) ++count; if (flags & MF_SOURCE_READERF_ENDOFSTREAM) break;
     }
     require(count>0,"Saved video contains no decoded frames.");

@@ -18,6 +18,7 @@ public:
 };
 enum class Phase { Idle, Starting, Recording, Paused, Saving };
 struct RecordingState {
+    uint64_t serial = 0;
     Phase phase = Phase::Idle;
     std::wstring source, codec;
     std::filesystem::path saved;
@@ -34,13 +35,14 @@ class Recorder {
     Timeline timeline_;
     int64_t activeSince_ = 0;
     RecordingState state_;
+    uint64_t serial_ = 0;
     std::deque<AudioPacket> audio_;
     size_t queuedSamples_ = 0;
     void run(Source, Frames*, bool, std::filesystem::path);
 public:
     ~Recorder() { stop(); }
     void start(Source, Frames* camera, bool audio, const std::filesystem::path&);
-    void stop();
+    void stop(const std::string& error = "");
     void pause(const std::string& reason = "");
     void resume();
     void audio(std::vector<int16_t>, int64_t timestamp);

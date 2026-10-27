@@ -42,7 +42,7 @@ void Camera::start(const std::wstring& id) {
         std::vector<Candidate> candidates;
         for (DWORD i = 0; ; ++i) {
             ComPtr<IMFMediaType> type;
-            HRESULT hr = reader_->GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, i, &type);
+            HRESULT hr = reader_->GetNativeMediaType(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), i, &type);
             if (hr == MF_E_NO_MORE_TYPES) break;
             check(hr, "Enumerate camera formats");
             VideoMode item;
@@ -59,18 +59,25 @@ void Camera::start(const std::wstring& id) {
         // USB mode must never quietly turn a 4K camera into a 720p recording.
         for (const auto& item : candidates) {
             if (item.mode.pixels() != maximum) break;
-            last = reader_->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, item.type.Get());
+            last = reader_->SetCurrentMediaType(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), nullptr, item.type.Get());
             if (FAILED(last)) continue;
             ComPtr<IMFMediaType> output; check(MFCreateMediaType(&output), "Create camera output type");
             output->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
             output->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
             MFSetAttributeSize(output.Get(), MF_MT_FRAME_SIZE, item.mode.width, item.mode.height);
             MFSetAttributeRatio(output.Get(), MF_MT_FRAME_RATE, item.mode.rateNumerator, item.mode.rateDenominator);
-            last = reader_->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, output.Get());
+            last = reader_->SetCurrentMediaType(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), nullptr, output.Get());
             if (FAILED(last)) continue;
-            ComPtr<IMFMediaType> actual; check(reader_->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &actual), "Verify camera format");
+            ComPtr<IMFMediaType> actual; check(reader_->GetCurrentMediaType(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), &actual), "Verify camera format");
             UINT32 w = 0, h = 0; check(MFGetAttributeSize(actual.Get(), MF_MT_FRAME_SIZE, &w, &h), "Read actual camera resolution");
             if (w != item.mode.width || h != item.mode.height) continue;
+            // Check the device side too: a converter reporting a large output
+            // is not evidence that the camera actually acquired that size.
+            ComPtr<IMFMediaType> native;
+            check(reader_->GetNativeMediaType(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), DWORD(MF_SOURCE_READER_CURRENT_TYPE_INDEX), &native), "Read negotiated camera mode");
+            UINT32 nativeWidth = 0, nativeHeight = 0;
+            check(MFGetAttributeSize(native.Get(), MF_MT_FRAME_SIZE, &nativeWidth, &nativeHeight), "Read native camera resolution");
+            if (nativeWidth != w || nativeHeight != h) continue;
             mode = item.mode; configured = true; break;
         }
         if (!configured) { std::string detail = "Cannot open the camera at its maximum resolution " + narrow(dimensions(candidates.front().mode.width, candidates.front().mode.height)); check(FAILED(last) ? last : E_FAIL, detail.c_str()); }
@@ -83,15 +90,26 @@ void Camera::start(const std::wstring& id) {
 void Camera::read() {
     try {
         Apartment apartment;
-        ComPtr<IMFMediaType> type; check(reader_->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &type), "Get camera pixel layout");
+        ComPtr<IMFMediaType> type; check(reader_->GetCurrentMediaType(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), &type), "Get camera pixel layout");
         LONG defaultStride = LONG(MFGetAttributeUINT32(type.Get(), MF_MT_DEFAULT_STRIDE, mode.width * 4));
         while (!stop_) {
             DWORD flags = 0; LONGLONG timestamp = 0; ComPtr<IMFSample> sample;
-            HRESULT hr = reader_->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, nullptr, &flags, &timestamp, &sample);
+            HRESULT hr = reader_->ReadSample(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), 0, nullptr, &flags, &timestamp, &sample);
             if (stop_) break;
             check(hr, "Read camera frame");
             if (flags & MF_SOURCE_READERF_ENDOFSTREAM) throw std::runtime_error("The camera was disconnected.");
-            if (flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) throw std::runtime_error("Camera format changed; reopen the camera to preserve full resolution.");
+            if (flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) {
+                // Some drivers announce the negotiated type with the first
+                // frame. Accept that notification only at the chosen size.
+                ComPtr<IMFMediaType> actual;
+                check(reader_->GetCurrentMediaType(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), &actual), "Verify changed camera format");
+                UINT32 width = 0, height = 0; GUID subtype{};
+                MFGetAttributeSize(actual.Get(), MF_MT_FRAME_SIZE, &width, &height);
+                actual->GetGUID(MF_MT_SUBTYPE, &subtype);
+                if (width != mode.width || height != mode.height || subtype != MFVideoFormat_RGB32)
+                    throw std::runtime_error("Camera format changed; reopen the camera to preserve full resolution.");
+                defaultStride = LONG(MFGetAttributeUINT32(actual.Get(), MF_MT_DEFAULT_STRIDE, mode.width * 4));
+            }
             if (!sample) continue;
             ComPtr<IMFMediaBuffer> buffer; check(sample->ConvertToContiguousBuffer(&buffer), "Read camera pixels");
             Frame frame(mode.width, mode.height);

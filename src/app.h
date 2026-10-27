@@ -28,6 +28,7 @@ class App {
     RECT dragRect_{}, selection_{}, selectionBounds_{};
     int dragCorner_ = -1;
     Phase previousPhase_ = Phase::Idle;
+    uint64_t shownCompletion_ = 0;
     bool shortcuts_ = false;
     bool preview_ = false;
     std::wstring setting(const wchar_t*, const wchar_t* fallback = L"");

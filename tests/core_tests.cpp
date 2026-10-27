@@ -19,7 +19,7 @@ int main() {
         require(mirrored.bgra[0] == camera.bgra[8], "Mirroring must preserve full source width.");
         Frame black(4,4); auto nv12 = toNV12(black);
         require(nv12.size() == 24 && nv12[0] == 16 && nv12[16] == 128, "NV12 limited-range black is wrong.");
-        Frame white(4,4); std::fill(white.bgra.begin(),white.bgra.end(),255); auto encoded = toNV12(white);
+        Frame white(4,4); std::fill(white.bgra.begin(),white.bgra.end(),uint8_t(255)); auto encoded = toNV12(white);
         require(encoded[0] >= 234 && encoded[0] <= 235, "NV12 white level is wrong.");
         Timeline time; time.start(100); time.pause(400); require(time.time(800)==300,"Pause must freeze movie time.");
         time.resume(900); require(time.time(1100)==500,"Paused time must not enter the movie.");
