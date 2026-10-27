@@ -70,12 +70,28 @@ struct DesktopCapture::State {
             auto content = captured.ContentSize();
             if (content.Width <= 0 || content.Height <= 0)
                 return;
+            if (content.Width != size.Width || content.Height != size.Height) {
+                // The first resized frame still owns an old-size pool surface.
+                // Release it before rebuilding the pool; never publish a clipped frame.
+                captured.Close();
+                captured = nullptr;
+                staging.Reset();
+                size = content;
+                sender.Recreate(winDevice, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size);
+                return;
+            }
             auto access = captured.Surface()
                               .as<::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
             ComPtr<ID3D11Texture2D> texture;
             check(access->GetInterface(IID_PPV_ARGS(&texture)), "Read capture texture");
             D3D11_TEXTURE2D_DESC description{};
             texture->GetDesc(&description);
+            if (staging) {
+                D3D11_TEXTURE2D_DESC allocated{};
+                staging->GetDesc(&allocated);
+                if (allocated.Width != description.Width || allocated.Height != description.Height)
+                    staging.Reset();
+            }
             if (!staging) {
                 auto cpu = description;
                 cpu.Usage = D3D11_USAGE_STAGING;
@@ -84,13 +100,6 @@ struct DesktopCapture::State {
                 cpu.MiscFlags = 0;
                 check(device->CreateTexture2D(&cpu, nullptr, &staging),
                       "Allocate full-resolution capture buffer");
-            }
-            D3D11_TEXTURE2D_DESC allocated{};
-            staging->GetDesc(&allocated);
-            if (allocated.Width != description.Width || allocated.Height != description.Height) {
-                staging.Reset();
-                captured.Close();
-                return;
             }
             context->CopyResource(staging.Get(), texture.Get());
             RECT crop{0, 0, std::min<LONG>(content.Width, description.Width),
@@ -134,11 +143,6 @@ struct DesktopCapture::State {
             context->Unmap(staging.Get(), 0);
             output->put(std::move(image));
             captured.Close();
-            if (content.Width != size.Width || content.Height != size.Height) {
-                size = content;
-                staging.Reset();
-                pool.Recreate(winDevice, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size);
-            }
         } catch (const winrt::hresult_error &error) {
             if (!stopping)
                 output->fail(narrow(error.message().c_str()));

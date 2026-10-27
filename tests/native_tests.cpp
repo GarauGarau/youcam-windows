@@ -231,7 +231,9 @@ int wmain(int argc, wchar_t **argv) {
                     "Window capture has wrong colors.");
             RECT original{};
             GetWindowRect(child.window, &original);
-            SetWindowPos(child.window, nullptr, 180, 160, 450, 350, SWP_NOZORDER | SWP_NOACTIVATE);
+            require(SetWindowPos(child.window, nullptr, 180, 160, 450, 350, SWP_NOZORDER | SWP_NOACTIVATE) !=
+                        FALSE,
+                    "Cannot resize capture fixture.");
             RECT resizedClient{};
             GetClientRect(child.window, &resizedClient);
             bool resized = false;
@@ -241,7 +243,14 @@ int wmain(int argc, wchar_t **argv) {
                 resized = current && current->width == uint32_t(resizedClient.right) &&
                           current->height == uint32_t(resizedClient.bottom);
             }
-            require(resized, "Window capture did not retain native pixels after resize.");
+            if (!resized) {
+                auto current = window.frames->get();
+                std::ostringstream message;
+                message << "Window capture did not retain native pixels after resize: expected "
+                        << resizedClient.right << 'x' << resizedClient.bottom << ", got "
+                        << (current ? current->width : 0) << 'x' << (current ? current->height : 0);
+                throw std::runtime_error(message.str());
+            }
             SetWindowPos(child.window, nullptr, original.left, original.top, rectWidth(original),
                          rectHeight(original), SWP_NOZORDER | SWP_NOACTIVATE);
             window.stop();
