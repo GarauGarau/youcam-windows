@@ -11,6 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: conda-incubator/setup-miniconda@fc2d68f6413eb2d87b895e92f8584b5b94a10167 # v3
+        id: environment
         with:
           miniforge-version: latest
           activate-environment: youcam-windows
@@ -20,5 +21,6 @@ jobs:
         shell: cmd
         run: call test.cmd
       - name: Native window, screen and hotkey checks
+        if: ${{ !cancelled() && steps.environment.outcome == 'success' }}
         shell: cmd
         run: call test-native.cmd

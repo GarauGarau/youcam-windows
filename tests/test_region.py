@@ -317,7 +317,7 @@ class RegionInteractionTests(unittest.TestCase):
         self.assertEqual(self.youcam.panel.notice_path, str(path))
         with patch("youcam.app.QDesktopServices.openUrl") as reveal:
             QTest.mouseClick(self.youcam.panel.reveal_button, Qt.MouseButton.LeftButton)
-            self.assertEqual(reveal.call_args.args[0].toLocalFile(), str(path.parent))
+            self.assertEqual(Path(reveal.call_args.args[0].toLocalFile()), path.parent)
 
     def test_closed_window_while_paused_saves_and_shows_persistent_notice(self):
         path = self.start_movie()
