@@ -363,7 +363,14 @@ int wmain(int argc, wchar_t **argv) {
             RECT resizedClient{};
             GetClientRect(child.window, &resizedClient);
             bool resized = false;
-            for (int i = 0; i < 100 && !resized; ++i) {
+            // Keep the test's own UI responsive while the compositor and capture
+            // pool catch up, just as awaitPixels does for capture exclusion.
+            for (int i = 0; i < 250 && !resized; ++i) {
+                MSG event{};
+                while (PeekMessageW(&event, nullptr, 0, 0, PM_REMOVE)) {
+                    TranslateMessage(&event);
+                    DispatchMessageW(&event);
+                }
                 Sleep(20);
                 auto current = window.frames->get();
                 resized = current && current->width == uint32_t(resizedClient.right) &&
