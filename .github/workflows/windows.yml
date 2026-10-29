@@ -1,6 +1,7 @@
 name: Native Windows checks
 on:
   push:
+  pull_request:
   workflow_dispatch:
 permissions:
   contents: read
@@ -21,18 +22,42 @@ jobs:
           if ($feature -and -not $feature.Installed) { Install-WindowsFeature Server-Media-Foundation }
       - name: Test native capture and full-resolution encoding
         run: ctest --test-dir build -C Release --output-on-failure -V
-      - name: Save native executable
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: YouCam-native-windows-x64
-          path: |
-            build/Release/YouCam.exe
-            LICENSE
-            README.md
-          retention-days: 14
       - name: Inspect executable dependencies
         shell: pwsh
         run: |
           $dumpbin = Get-ChildItem "${env:ProgramFiles}\Microsoft Visual Studio\*\*\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Select-Object -Last 1
           if (-not $dumpbin) { throw "MSVC dumpbin was not found" }
           & $dumpbin.FullName /dependents build/Release/YouCam.exe
+          if ($LASTEXITCODE -ne 0) { throw "Dependency inspection failed" }
+      - name: Package Windows download
+        shell: pwsh
+        run: ./scripts/package.ps1
+      - name: Save Windows download
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: YouCam-native-windows-x64
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: YouCam-native-windows-x64
+          path: dist
+      - name: Publish Windows release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: >-
+          gh release create "$RELEASE_TAG"
+          dist/YouCam.exe dist/YouCam-windows-x64.zip dist/SHA256SUMS.txt
+          --verify-tag --latest
+          --title "YouCam for Windows $RELEASE_TAG"
+          --notes-file .github/RELEASE_NOTES.md

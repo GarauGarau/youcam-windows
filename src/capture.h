@@ -1,7 +1,8 @@
 #pragma once
 #include "common.h"
 namespace youcam {
-enum class SourceKind { Screen, Region, Window, Camera };
+enum class SourceKind { Screen, Region, Window, Camera, Stage };
+inline bool windowSource(SourceKind kind) { return kind == SourceKind::Window || kind == SourceKind::Stage; }
 struct Source {
     SourceKind kind = SourceKind::Screen;
     HMONITOR monitor = nullptr;
@@ -9,6 +10,8 @@ struct Source {
     RECT area{}; // Physical desktop pixels; region is confined to one monitor.
     std::wstring name;
     bool mirror = false;
+    Crop crop;
+    CameraOverlay cameraOverlay;
 };
 struct Monitor {
     HMONITOR handle;

@@ -12,6 +12,7 @@ class Camera {
     Frames frames;
     VideoMode mode;
     std::wstring name;
+    std::atomic<bool> deviceTimestamps{false};
     ~Camera() {
         shutdown();
     }

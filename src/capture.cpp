@@ -67,6 +67,12 @@ struct DesktopCapture::State {
             auto captured = sender.TryGetNextFrame();
             if (!captured)
                 return;
+            // FrameArrived can lag behind the compositor under load. Drain the
+            // small pool and copy only the newest available surface.
+            while (auto newer = sender.TryGetNextFrame()) {
+                captured.Close();
+                captured = std::move(newer);
+            }
             auto content = captured.ContentSize();
             if (content.Width <= 0 || content.Height <= 0)
                 return;
@@ -114,7 +120,7 @@ struct DesktopCapture::State {
                     crop.bottom > content.Height)
                     throw std::runtime_error(
                         "The selected area no longer fits the display. Select it again.");
-            } else if (source.kind == SourceKind::Window) {
+            } else if (windowSource(source.kind)) {
                 RECT bounds{};
                 GetWindowRect(source.window, &bounds);
                 RECT visible{};
@@ -133,6 +139,7 @@ struct DesktopCapture::State {
                     crop = desired;
             }
             Frame image(uint32_t(rectWidth(crop)), uint32_t(rectHeight(crop)));
+            image.capturedAt = captured.SystemRelativeTime().count();
             D3D11_MAPPED_SUBRESOURCE mapped{};
             check(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped), "Map capture pixels");
             for (uint32_t y = 0; y < image.height; ++y)
@@ -175,7 +182,7 @@ void DesktopCapture::start(const Source &source) {
               "Create Windows graphics device");
         state->winDevice = inspectable.as<IDirect3DDevice>();
         auto factory = winrt::get_activation_factory<GraphicsCaptureItem, IGraphicsCaptureItemInterop>();
-        if (source.kind == SourceKind::Window)
+        if (windowSource(source.kind))
             check(factory->CreateForWindow(source.window, winrt::guid_of<GraphicsCaptureItem>(),
                                            winrt::put_abi(state->item)),
                   "Select window capture");
@@ -195,6 +202,8 @@ void DesktopCapture::start(const Source &source) {
         state->pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
             state->winDevice, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, state->size);
         state->session = state->pool.CreateCaptureSession(state->item);
+        if (source.kind == SourceKind::Stage)
+            state->session.IsCursorCaptureEnabled(false);
         std::weak_ptr<State> weak = state;
         state->arrived = state->pool.FrameArrived([weak](auto const &sender, auto const &) {
             if (auto s = weak.lock())

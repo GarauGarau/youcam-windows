@@ -1,4 +1,5 @@
 #include "recorder.h"
+#include "visuals.h"
 #include <codecapi.h>
 #include <cstring>
 #include <iomanip>
@@ -24,7 +25,8 @@ ComPtr<IMFMediaType> videoType(REFGUID subtype, uint32_t width, uint32_t height)
 void Movie::open(const std::filesystem::path &path, uint32_t width, uint32_t height, bool audio,
                  bool hardware, bool hevc) {
     ComPtr<IMFAttributes> attributes;
-    check(MFCreateAttributes(&attributes, 3), "Create encoder attributes");
+    check(MFCreateAttributes(&attributes, 4), "Create encoder attributes");
+    attributes->SetUINT32(MF_LOW_LATENCY, TRUE);
     attributes->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, hardware);
     attributes->SetUINT32(MF_SINK_WRITER_DISABLE_THROTTLING, TRUE);
     attributes->SetGUID(MF_TRANSCODE_CONTAINERTYPE, MFTranscodeContainerType_MPEG4);
@@ -68,6 +70,8 @@ void Movie::open(const std::filesystem::path &path, uint32_t width, uint32_t hei
     width_ = width;
     height_ = height;
     audioEnabled_ = audio;
+    audioStarted_ = false;
+    videoFrames_ = 0;
 }
 void Movie::start(const std::filesystem::path &path, uint32_t width, uint32_t height, bool audio) {
     std::string error;
@@ -107,13 +111,45 @@ void Movie::sample(DWORD stream, const void *data, size_t bytes, int64_t time, i
 void Movie::video(const Frame &frame, int64_t timestamp, int64_t duration) {
     if (frame.width != width_ || frame.height != height_)
         throw std::runtime_error("Video resolution changed unexpectedly.");
+    if (timestamp < 0 || duration <= 0)
+        throw std::runtime_error("Invalid video interval.");
+    // A nominal MF_MT_FRAME_RATE does not convert variable-duration samples.
+    // Keep the capture clock, rounding each transition to the nearest frame;
+    // duplicate images when capture is slow instead of stretching one sample.
+    const auto endFrame = std::max<int64_t>(1, ((timestamp + duration) * 30 + 5000000) / 10000000);
+    if (endFrame <= videoFrames_)
+        return;
+    // Convert once even when this image covers multiple output frames.
     auto nv12 = toNV12(frame);
-    sample(video_, nv12.data(), nv12.size(), timestamp, duration);
+    while (videoFrames_ < endFrame) {
+        // Use rational endpoints, not accumulated 333333-tick durations. Round
+        // up to 100 ns so MP4 timescale conversion does not put frames early.
+        const auto time = (videoFrames_ * 10000000 + 29) / 30;
+        const auto next = ((videoFrames_ + 1) * 10000000 + 29) / 30;
+        sample(video_, nv12.data(), nv12.size(), time, next - time);
+        ++videoFrames_;
+    }
 }
 void Movie::audio(const std::vector<int16_t> &samples, int64_t timestamp) {
-    if (audioEnabled_ && !samples.empty())
-        sample(audio_, samples.data(), samples.size() * 2, timestamp,
-               int64_t(samples.size()) * 10000000 / 48000);
+    if (!audioEnabled_ || samples.empty())
+        return;
+    if (!audioStarted_) {
+        // Microphone startup can lag video. Represent that real delay with
+        // silence, so editors see both tracks beginning at zero, without
+        // relying on an MP4 edit list or moving speech earlier.
+        const int64_t silenceSamples = std::max<int64_t>(0, timestamp * 48000 / 10000000);
+        std::vector<int16_t> silence(4800, 0);
+        for (int64_t written = 0; written < silenceSamples;) {
+            const auto count = std::min<int64_t>(int64_t(silence.size()), silenceSamples - written);
+            const auto time = written * 10000000 / 48000;
+            const auto end = (written + count) * 10000000 / 48000;
+            sample(audio_, silence.data(), size_t(count) * 2, time, end - time);
+            written += count;
+        }
+        audioStarted_ = true;
+    }
+    sample(audio_, samples.data(), samples.size() * 2, timestamp,
+           int64_t(samples.size()) * 10000000 / 48000);
 }
 void Movie::finish() {
     if (!writer_)
@@ -155,12 +191,17 @@ void Recorder::start(Source source, Frames *camera, bool audio, const std::files
         state_.serial = ++serial_;
         state_.phase = Phase::Starting;
         state_.source = source.name;
+        cameraOverlay_ = source.cameraOverlay;
         timeline_.start(clock100ns());
         stop_ = false;
         audio_.clear();
         queuedSamples_ = 0;
     }
     thread_ = std::thread([this, source, camera, audio, path] { run(source, camera, audio, path); });
+}
+void Recorder::setCameraOverlay(CameraOverlay overlay) {
+    std::lock_guard lock(mutex_);
+    cameraOverlay_ = overlay;
 }
 void Recorder::pause(const std::string &reason) {
     std::lock_guard lock(mutex_);
@@ -185,6 +226,7 @@ void Recorder::stop(const std::string &error) {
     {
         std::lock_guard lock(mutex_);
         stop_ = true;
+        timeline_.pause(clock100ns());
         if (!error.empty())
             state_.error = error;
         condition_.notify_all();
@@ -198,7 +240,7 @@ void Recorder::audio(std::vector<int16_t> samples, int64_t timestamp) {
         return;
     // A packet straddling Start/Resume may contain samples from the pause.
     if (timestamp < activeSince_) {
-        size_t trim = size_t((activeSince_ - timestamp) * 48000 / 10000000);
+        size_t trim = size_t(((activeSince_ - timestamp) * 48000 + 9999999) / 10000000);
         if (trim >= samples.size())
             return;
         samples.erase(samples.begin(), samples.begin() + trim);
@@ -208,6 +250,7 @@ void Recorder::audio(std::vector<int16_t> samples, int64_t timestamp) {
     if (queuedSamples_ > 48000 * 5) {
         state_.error = "The encoder cannot keep up with full-resolution recording.";
         stop_ = true;
+        timeline_.pause(clock100ns());
         return;
     }
     audio_.push_back({std::move(samples), timeline_.time(timestamp)});
@@ -218,9 +261,16 @@ void Recorder::run(Source source, Frames *camera, bool withAudio, std::filesyste
     Movie movie;
     DesktopCapture capture;
     bool wroteVideo = false;
+    std::shared_ptr<const Frame> pendingVideo;
+    int64_t pendingTime = 0;
     try {
+        // The compositor runs on this worker, independently of preview visibility.
+        std::unique_ptr<Drawing> drawing;
+        if (source.kind == SourceKind::Window)
+            drawing = std::make_unique<Drawing>();
         Frames *frames = camera;
-        if (source.kind != SourceKind::Camera) {
+        const bool directStage = source.kind == SourceKind::Stage && camera;
+        if (source.kind != SourceKind::Camera && !directStage) {
             capture.start(source);
             frames = capture.frames.get();
         }
@@ -228,7 +278,7 @@ void Recorder::run(Source source, Frames *camera, bool withAudio, std::filesyste
             throw std::runtime_error("No camera source is available.");
         std::shared_ptr<const Frame> first;
         auto deadline = clock100ns() + 50000000;
-        while (!(first = frames->get(source.kind == SourceKind::Camera))) {
+        while (!(first = frames->get(source.kind == SourceKind::Camera || directStage))) {
             {
                 std::lock_guard lock(mutex_);
                 if (stop_)
@@ -238,7 +288,9 @@ void Recorder::run(Source source, Frames *camera, bool withAudio, std::filesyste
                 throw std::runtime_error("No full-resolution frame arrived from the selected source.");
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
-        auto width = evenExtent(first->width), height = evenExtent(first->height);
+        auto region = cropPixels(first->width, first->height,
+                                 source.kind == SourceKind::Camera ? source.crop : Crop{});
+        auto width = evenExtent(region.width), height = evenExtent(region.height);
         movie.start(path, width, height, withAudio);
         {
             std::lock_guard lock(mutex_);
@@ -253,13 +305,19 @@ void Recorder::run(Source source, Frames *camera, bool withAudio, std::filesyste
         while (true) {
             std::deque<AudioPacket> packets;
             bool stopping, paused;
+            CameraOverlay overlay;
             int64_t elapsed;
+            Timeline videoTimeline;
+            int64_t activeSince;
             {
                 std::unique_lock lock(mutex_);
                 condition_.wait_for(lock, std::chrono::milliseconds(5));
                 stopping = stop_;
                 paused = timeline_.paused();
                 elapsed = timeline_.time(clock100ns());
+                videoTimeline = timeline_;
+                activeSince = activeSince_;
+                overlay = cameraOverlay_;
                 packets.swap(audio_);
                 queuedSamples_ = 0;
             }
@@ -270,7 +328,7 @@ void Recorder::run(Source source, Frames *camera, bool withAudio, std::filesyste
             }
             if (stopping)
                 break;
-            if (source.kind == SourceKind::Window) {
+            if (windowSource(source.kind)) {
                 if (!IsWindow(source.window))
                     throw std::runtime_error(
                         "The selected window was closed. Received frames have been saved.");
@@ -284,22 +342,59 @@ void Recorder::run(Source source, Frames *camera, bool withAudio, std::filesyste
             const auto frameNumber = elapsed * 30 / 10000000;
             if (frameNumber < nextFrame)
                 continue;
-            auto frame = frames->get(source.kind == SourceKind::Camera);
+            auto frame = frames->get(source.kind == SourceKind::Camera || directStage);
             if (!frame)
                 continue;
-            if (source.kind != SourceKind::Window &&
+            nextFrame = frameNumber + 1;
+            if ((!windowSource(source.kind) || directStage) &&
                 (frame->width != first->width || frame->height != first->height))
                 throw std::runtime_error(
                     "The source resolution changed. Start a new recording to use the new native resolution.");
             Frame fitted;
+            Frame cropped;
+            Frame composited;
             const Frame *pixels = frame.get();
-            if (frame->width != width || frame->height != height || source.mirror) {
-                fitted = fitFrame(*frame, width, height, source.mirror);
+            if (source.kind == SourceKind::Window && overlay.enabled) {
+                auto cameraFrame = camera ? camera->get(true) : nullptr;
+                if (!cameraFrame)
+                    throw std::runtime_error("No live webcam frame is available for window + camera recording.");
+                composited = composeWindow(*frame, *cameraFrame, overlay);
+                pixels = &composited;
+            }
+            if (source.kind == SourceKind::Camera && !source.crop.full()) {
+                cropped = cropFrame(*frame, source.crop);
+                pixels = &cropped;
+            }
+            if (pixels->width != width || pixels->height != height || source.mirror) {
+                fitted = fitFrame(*pixels, width, height, source.mirror);
                 pixels = &fitted;
             }
-            movie.video(*pixels, frameNumber * 10000000 / 30, 10000000 / 30);
-            wroteVideo = true;
-            nextFrame = frameNumber + 1;
+            // Camera and composed-camera images must share the microphone's
+            // capture clock. Assigning the encoder's current time here shifts
+            // speech by the entire camera/decode/render delay.
+            bool timedCamera = source.kind == SourceKind::Camera || directStage ||
+                               (source.kind == SourceKind::Window && overlay.enabled);
+            int64_t videoTime = frameNumber * 10000000 / 30;
+            if (timedCamera && pixels->capturedAt) {
+                // Frames still in flight at Start/Resume belong to the previous
+                // segment. Never move them forward into the new segment.
+                if (pixels->capturedAt < activeSince)
+                    continue;
+                videoTime = videoTimeline.time(pixels->capturedAt);
+            }
+            if (pendingVideo && videoTime <= pendingTime)
+                continue;
+            if (pendingVideo) {
+                movie.video(*pendingVideo, pendingTime, videoTime - pendingTime);
+                wroteVideo = true;
+            }
+            // Wait for the next capture timestamp before resampling this
+            // interval. Using delivery time would bake camera latency into lip sync.
+            if (pixels == frame.get()) pendingVideo = frame;
+            else if (pixels == &fitted) pendingVideo = std::make_shared<Frame>(std::move(fitted));
+            else if (pixels == &cropped) pendingVideo = std::make_shared<Frame>(std::move(cropped));
+            else pendingVideo = std::make_shared<Frame>(std::move(composited));
+            pendingTime = videoTime;
         }
     } catch (const std::exception &error) {
         std::lock_guard lock(mutex_);
@@ -308,13 +403,25 @@ void Recorder::run(Source source, Frames *camera, bool withAudio, std::filesyste
         std::lock_guard lock(mutex_);
         state_.error = "Windows could not capture the selected source.";
     }
-    capture.stop();
     {
         std::lock_guard lock(mutex_);
+        // Freeze before capture shutdown/finalization, which can take time.
+        timeline_.pause(clock100ns());
         state_.elapsed = timeline_.time(clock100ns());
         state_.phase = Phase::Saving;
     }
-    // Finalize even after device loss, so useful frames remain playable.
+    capture.stop();
+    try {
+        if (pendingVideo) {
+            movie.video(*pendingVideo, pendingTime, std::max<int64_t>(1, state().elapsed - pendingTime));
+            wroteVideo = true;
+        }
+    } catch (const std::exception &error) {
+        std::lock_guard lock(mutex_);
+        state_.error += std::string(" ") + error.what();
+    }
+    // Finalize even after device loss or a failed last frame, so useful frames
+    // remain playable.
     try {
         movie.finish();
         if (wroteVideo) {

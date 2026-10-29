@@ -17,9 +17,12 @@ int main() {
         require(evenExtent(5121) == 5122 && evenExtent(1441) == 1442,
                 "Odd dimensions must be padded, not cropped.");
         Frame camera(3, 3);
+        camera.capturedAt = 1234567;
         for (size_t i = 0; i < camera.bgra.size(); ++i)
             camera.bgra[i] = uint8_t(i);
         auto padded = fitFrame(camera, 4, 4);
+        require(padded.capturedAt == camera.capturedAt && cropFrame(camera, {}).capturedAt == camera.capturedAt,
+                "Crop and fit must preserve capture timestamps for lip sync.");
         for (uint32_t y = 0; y < 3; ++y)
             for (uint32_t x = 0; x < 3; ++x)
                 require(padded.bgra[(y * 4 + x) * 4] == camera.bgra[(y * 3 + x) * 4],
@@ -28,6 +31,24 @@ int main() {
                 "Padding repeats the last edge pixel.");
         auto mirrored = fitFrame(camera, 4, 4, true);
         require(mirrored.bgra[0] == camera.bgra[8], "Mirroring must preserve full source width.");
+        Frame grid(8, 6);
+        for (uint32_t y = 0; y < grid.height; ++y)
+            for (uint32_t x = 0; x < grid.width; ++x)
+                grid.bgra[(y * grid.width + x) * 4] = uint8_t(y * 10 + x);
+        Crop selection{.25, 1.0 / 6, .75, 5.0 / 6};
+        auto cropped = cropFrame(grid, selection);
+        require(cropped.width == 4 && cropped.height == 4 && cropped.bgra[0] == 12 &&
+                cropped.bgra[(3 * 4 + 3) * 4] == 45, "Crop must preserve the selected native pixels.");
+        auto cropMirror = fitFrame(cropped, 4, 4, true);
+        require(cropMirror.bgra[0] == 15, "Mirror must operate within the selected crop.");
+        auto full = cropFrame(grid, {});
+        require(full.bgra == grid.bgra, "Full frame must restore every original pixel.");
+        auto flipped = mirroredCrop({0, .2, .25, .8});
+        require(flipped.left == .75 && flipped.right == 1 && flipped.top == .2,
+                "A mirrored selection must map back to the original sensor coordinates.");
+        auto edge = cropPixels(3840, 2160, {.999, .999, 1, 1});
+        require(edge.x + edge.width <= 3840 && edge.y + edge.height <= 2160 && edge.width && edge.height,
+                "Edge crops must stay inside the image.");
         Frame black(4, 4);
         auto nv12 = toNV12(black);
         require(nv12.size() == 24 && nv12[0] == 16 && nv12[16] == 128, "NV12 limited-range black is wrong.");
@@ -35,6 +56,35 @@ int main() {
         std::fill(white.bgra.begin(), white.bgra.end(), uint8_t(255));
         auto encoded = toNV12(white);
         require(encoded[0] >= 234 && encoded[0] <= 235, "NV12 white level is wrong.");
+        // Exercise SIMD lanes, scalar tail, row padding and unaligned input.
+        for (bool bt709 : {false, true}) for (bool fullRange : {false, true}) {
+            constexpr size_t stride = 18;
+            Frame decoded(10, 6);
+            std::vector<uint8_t> input(stride * 9 + 1);
+            for (size_t i = 0; i < input.size(); ++i) input[i] = uint8_t(i * 97 + 11);
+            fromNV12(decoded, input.data() + 1, stride, bt709, fullRange);
+            int cy = fullRange ? 256 : 298, offset = fullRange ? 0 : 16;
+            int cr = bt709 ? (fullRange ? 403 : 459) : (fullRange ? 359 : 409);
+            int cb = bt709 ? (fullRange ? 475 : 541) : (fullRange ? 454 : 516);
+            int gu = bt709 ? (fullRange ? -48 : -55) : (fullRange ? -88 : -100);
+            int gv = bt709 ? (fullRange ? -120 : -136) : (fullRange ? -183 : -208);
+            for (uint32_t y = 0; y < decoded.height; ++y) for (uint32_t x = 0; x < decoded.width; ++x) {
+                int yy = int(input[1 + y * stride + x]) - offset;
+                int u = int(input[1 + (6 + y / 2) * stride + (x & ~1u)]) - 128;
+                int v = int(input[1 + (6 + y / 2) * stride + (x & ~1u) + 1]) - 128;
+                const auto p = &decoded.bgra[(y * decoded.width + x) * 4];
+                require(p[0] == std::clamp((cy * yy + cb * u + 128) >> 8, 0, 255) &&
+                        p[1] == std::clamp((cy * yy + gu * u + gv * v + 128) >> 8, 0, 255) &&
+                        p[2] == std::clamp((cy * yy + cr * v + 128) >> 8, 0, 255) && p[3] == 255,
+                        "SIMD camera conversion differs from scalar reference.");
+            }
+        }
+        Frame roundTrip(4, 4);
+        std::vector<uint8_t> neutralWhite(24, 128);
+        std::fill_n(neutralWhite.begin(), 16, uint8_t(235));
+        fromNV12(roundTrip, neutralWhite.data(), 4, true);
+        require(roundTrip.bgra[0] >= 254 && roundTrip.bgra[1] >= 254 && roundTrip.bgra[2] >= 254,
+                "Camera conversion must preserve white without a color cast.");
         Timeline time;
         time.start(100);
         time.pause(400);

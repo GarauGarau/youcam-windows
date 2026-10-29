@@ -7,12 +7,16 @@ class Movie {
     DWORD video_ = 0, audio_ = 0;
     uint32_t width_ = 0, height_ = 0;
     bool audioEnabled_ = false;
+    bool audioStarted_ = false;
+    int64_t videoFrames_ = 0;
     void open(const std::filesystem::path &, uint32_t, uint32_t, bool, bool, bool);
     void sample(DWORD stream, const void *data, size_t bytes, int64_t timestamp, int64_t duration);
 
   public:
     std::wstring codec;
     void start(const std::filesystem::path &, uint32_t, uint32_t, bool audio);
+    // Supply each source image's interval on the shared recording clock.
+    // The writer resamples those intervals to a continuous 30 fps grid.
     void video(const Frame &, int64_t timestamp, int64_t duration);
     void audio(const std::vector<int16_t> &, int64_t timestamp);
     void finish();
@@ -39,6 +43,7 @@ class Recorder {
     Timeline timeline_;
     int64_t activeSince_ = 0;
     RecordingState state_;
+    CameraOverlay cameraOverlay_;
     uint64_t serial_ = 0;
     std::deque<AudioPacket> audio_;
     size_t queuedSamples_ = 0;
@@ -48,11 +53,14 @@ class Recorder {
     ~Recorder() {
         stop();
     }
+    // For Stage, pass the rendered scene frames; nullptr retains WGC capture.
+    // For Camera/Window, pass the webcam's native frames.
     void start(Source, Frames *camera, bool audio, const std::filesystem::path &);
     void stop(const std::string &error = "");
     void pause(const std::string &reason = "");
     void resume();
     void audio(std::vector<int16_t>, int64_t timestamp);
+    void setCameraOverlay(CameraOverlay);
     RecordingState state() const;
 };
 std::filesystem::path nextMoviePath();

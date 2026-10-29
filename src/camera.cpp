@@ -54,7 +54,10 @@ void Camera::start(const std::wstring &id) {
             throw std::runtime_error(
                 "No camera available. Connect a camera and allow desktop apps in Windows privacy settings.");
         ComPtr<IMFAttributes> config;
-        check(MFCreateAttributes(&config, 2), "Create camera reader attributes");
+        check(MFCreateAttributes(&config, 3), "Create camera reader attributes");
+        check(config->SetUINT32(MF_LOW_LATENCY, TRUE), "Enable low-latency camera capture");
+        check(config->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE),
+              "Enable camera hardware transforms");
         check(config->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE),
               "Enable camera color conversion");
         check(MFCreateSourceReaderFromMediaSource(source_.Get(), config.Get(), &reader_),
@@ -96,12 +99,19 @@ void Camera::start(const std::wstring &id) {
             ComPtr<IMFMediaType> output;
             check(MFCreateMediaType(&output), "Create camera output type");
             output->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-            output->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
             MFSetAttributeSize(output.Get(), MF_MT_FRAME_SIZE, item.mode.width, item.mode.height);
             MFSetAttributeRatio(output.Get(), MF_MT_FRAME_RATE, item.mode.rateNumerator,
                                 item.mode.rateDenominator);
-            last = reader_->SetCurrentMediaType(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), nullptr,
-                                                output.Get());
+            // Decode to NV12 and perform our own vectorized RGB conversion.
+            // Keep RGB32 as a compatibility fallback for unusual camera modes.
+            for (auto subtype : {MFVideoFormat_NV12, MFVideoFormat_RGB32}) {
+                if (subtype == MFVideoFormat_NV12 && ((item.mode.width | item.mode.height) & 1))
+                    continue;
+                output->SetGUID(MF_MT_SUBTYPE, subtype);
+                last = reader_->SetCurrentMediaType(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), nullptr,
+                                                    output.Get());
+                if (SUCCEEDED(last)) break;
+            }
             if (FAILED(last))
                 continue;
             ComPtr<IMFMediaType> actual;
@@ -148,7 +158,15 @@ void Camera::read() {
         ComPtr<IMFMediaType> type;
         check(reader_->GetCurrentMediaType(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), &type),
               "Get camera pixel layout");
-        LONG defaultStride = LONG(MFGetAttributeUINT32(type.Get(), MF_MT_DEFAULT_STRIDE, mode.width * 4));
+        GUID subtype{};
+        check(type->GetGUID(MF_MT_SUBTYPE, &subtype), "Read camera pixel format");
+        const bool nv12 = subtype == MFVideoFormat_NV12;
+        bool bt709 = MFGetAttributeUINT32(type.Get(), MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT601) ==
+                     MFVideoTransferMatrix_BT709;
+        bool fullRange = MFGetAttributeUINT32(type.Get(), MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235) ==
+                         MFNominalRange_0_255;
+        LONG defaultStride = LONG(MFGetAttributeUINT32(type.Get(), MF_MT_DEFAULT_STRIDE,
+                                                       mode.width * (nv12 ? 1 : 4)));
         while (!stop_) {
             DWORD flags = 0;
             LONGLONG timestamp = 0;
@@ -167,40 +185,61 @@ void Camera::read() {
                 check(reader_->GetCurrentMediaType(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), &actual),
                       "Verify changed camera format");
                 UINT32 width = 0, height = 0;
-                GUID subtype{};
+                GUID changedSubtype{};
                 MFGetAttributeSize(actual.Get(), MF_MT_FRAME_SIZE, &width, &height);
-                actual->GetGUID(MF_MT_SUBTYPE, &subtype);
-                if (width != mode.width || height != mode.height || subtype != MFVideoFormat_RGB32)
+                actual->GetGUID(MF_MT_SUBTYPE, &changedSubtype);
+                if (width != mode.width || height != mode.height || changedSubtype != subtype)
                     throw std::runtime_error(
                         "Camera format changed; reopen the camera to preserve full resolution.");
                 defaultStride =
-                    LONG(MFGetAttributeUINT32(actual.Get(), MF_MT_DEFAULT_STRIDE, mode.width * 4));
+                    LONG(MFGetAttributeUINT32(actual.Get(), MF_MT_DEFAULT_STRIDE, mode.width * (nv12 ? 1 : 4)));
+                bt709 = MFGetAttributeUINT32(actual.Get(), MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT601) ==
+                        MFVideoTransferMatrix_BT709;
+                fullRange = MFGetAttributeUINT32(actual.Get(), MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235) ==
+                            MFNominalRange_0_255;
             }
             if (!sample)
                 continue;
             ComPtr<IMFMediaBuffer> buffer;
             check(sample->ConvertToContiguousBuffer(&buffer), "Read camera pixels");
             Frame frame(mode.width, mode.height);
+            UINT64 deviceTime = 0;
+            deviceTimestamps = SUCCEEDED(sample->GetUINT64(MFSampleExtension_DeviceTimestamp, &deviceTime)) &&
+                               deviceTime != 0;
+            frame.capturedAt = deviceTimestamps ? int64_t(deviceTime) : clock100ns();
             ComPtr<IMF2DBuffer> twoDimensional;
             BYTE *pixels = nullptr;
             LONG stride = defaultStride;
             if (SUCCEEDED(buffer.As(&twoDimensional))) {
                 check(twoDimensional->Lock2D(&pixels, &stride), "Lock camera image");
-                for (UINT32 y = 0; y < mode.height; ++y)
-                    std::memcpy(&frame.bgra[size_t(y) * mode.width * 4], pixels + ptrdiff_t(y) * stride,
-                                size_t(mode.width) * 4);
+                if (nv12 && stride < LONG(mode.width)) {
+                    twoDimensional->Unlock2D();
+                    throw std::runtime_error("Invalid camera NV12 stride.");
+                }
+                if (nv12)
+                    fromNV12(frame, pixels, size_t(stride), bt709, fullRange);
+                else {
+                    for (UINT32 y = 0; y < mode.height; ++y)
+                        std::memcpy(&frame.bgra[size_t(y) * mode.width * 4], pixels + ptrdiff_t(y) * stride,
+                                    size_t(mode.width) * 4);
+                }
                 twoDimensional->Unlock2D();
             } else {
                 DWORD length = 0;
                 check(buffer->Lock(&pixels, nullptr, &length), "Lock camera buffer");
-                if (uint64_t(std::abs(stride)) * mode.height > length) {
+                auto required = uint64_t(std::abs(stride)) * mode.height * (nv12 ? 3 : 2) / 2;
+                if (required > length || (nv12 && stride < LONG(mode.width))) {
                     buffer->Unlock();
                     throw std::runtime_error("Incomplete full-resolution camera frame.");
                 }
-                BYTE *top = stride < 0 ? pixels + size_t(mode.height - 1) * size_t(-stride) : pixels;
-                for (UINT32 y = 0; y < mode.height; ++y)
-                    std::memcpy(&frame.bgra[size_t(y) * mode.width * 4], top + ptrdiff_t(y) * stride,
-                                size_t(mode.width) * 4);
+                if (nv12)
+                    fromNV12(frame, pixels, size_t(stride), bt709, fullRange);
+                else {
+                    BYTE *top = stride < 0 ? pixels + size_t(mode.height - 1) * size_t(-stride) : pixels;
+                    for (UINT32 y = 0; y < mode.height; ++y)
+                        std::memcpy(&frame.bgra[size_t(y) * mode.width * 4], top + ptrdiff_t(y) * stride,
+                                    size_t(mode.width) * 4);
+                }
                 buffer->Unlock();
             }
             frames.put(std::move(frame));
@@ -212,14 +251,19 @@ void Camera::read() {
 }
 void Camera::shutdown() {
     stop_ = true;
-    // Shutdown releases a pending synchronous ReadSample on device removal too.
-    if (source_)
-        source_->Shutdown();
+    // Cancel ReadSample before stopping the source. Some camera drivers never
+    // complete a pending read after source shutdown, leaving join (and the UI)
+    // blocked forever when switching devices or closing the application.
+    if (reader_)
+        reader_->Flush(DWORD(MF_SOURCE_READER_ALL_STREAMS));
     if (thread_.joinable())
         thread_.join();
+    if (source_)
+        source_->Shutdown();
     reader_.Reset();
     source_.Reset();
     mode = {};
+    deviceTimestamps = false;
     frames.clear();
 }
 } // namespace youcam

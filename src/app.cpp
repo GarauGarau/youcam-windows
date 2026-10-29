@@ -1,14 +1,12 @@
 #include "app.h"
 #include <windowsx.h>
 #include <iomanip>
+#include <dbt.h>
 
 namespace youcam {
+using namespace commands;
 namespace {
 constexpr UINT TrayMessage = WM_APP + 1;
-constexpr int Start = 100, Pause = 101, Panel = 102, HideCamera = 103, Mirror = 104, SelectArea = 105,
-              WholeScreen = 106, CameraOnly = 107, Quit = 108, Retry = 109, Reveal = 110, Help = 111,
-              SourceMenu = 112, AudioNone = 113, ShapeBase = 200, SizeBase = 210, CameraBase = 1000,
-              AudioBase = 2000, MonitorBase = 3000, WindowBase = 4000;
 constexpr COLORREF Transparent = RGB(1, 2, 3);
 HWND makeControl(HWND parent, const wchar_t *type, const wchar_t *label, int id, DWORD style = 0) {
     HWND window = CreateWindowExW(0, type, label, WS_CHILD | WS_VISIBLE | style, 0, 0, 20, 20, parent,
@@ -45,7 +43,8 @@ void CALLBACK controlShown(HWINEVENTHOOK, DWORD, HWND window, LONG object, LONG,
         exclude(window);
 }
 } // namespace
-App::App(HINSTANCE instance, bool preview) : instance_(instance), preview_(preview) {
+App::App(HINSTANCE instance, bool preview, const std::wstring &settingsPath)
+    : instance_(instance), settings_(settingsPath), preview_(preview) {
     initialize();
 }
 std::wstring App::setting(const wchar_t *key, const wchar_t *fallback) {
@@ -60,11 +59,21 @@ void App::initialize() {
     auto directory = std::filesystem::path(local) / L"YouCamNative";
     CoTaskMemFree(local);
     std::filesystem::create_directories(directory);
-    settings_ = (directory / L"settings.ini").wstring();
+    if (settings_.empty())
+        settings_ = (directory / L"settings.ini").wstring();
     cameraID_ = setting(L"Camera");
     microphoneID_ = setting(L"Microphone");
     shape_ = std::clamp(_wtoi(setting(L"Shape", L"0").c_str()), 0, 2);
     mirrored_ = setting(L"Mirror", L"1") != L"0";
+    crop_ = validCrop({ _wtoi(setting(L"CropLeft", L"0").c_str()) / 10000.0,
+                        _wtoi(setting(L"CropTop", L"0").c_str()) / 10000.0,
+                        _wtoi(setting(L"CropRight", L"10000").c_str()) / 10000.0,
+                        _wtoi(setting(L"CropBottom", L"10000").c_str()) / 10000.0 });
+    stageScale_ = std::clamp(_wtoi(setting(L"StageScale", L"68").c_str()) / 100.0, StageMinimum, StageMaximum);
+    windowCamera_.enabled = setting(L"WindowCamera", L"1") != L"0";
+    windowCamera_.x = std::clamp(_wtoi(setting(L"WindowCameraX", L"10000").c_str()) / 10000.0, 0.0, 1.0);
+    windowCamera_.y = std::clamp(_wtoi(setting(L"WindowCameraY", L"10000").c_str()) / 10000.0, 0.0, 1.0);
+    windowCamera_.size = std::clamp(_wtoi(setting(L"WindowCameraSize", L"2400").c_str()) / 10000.0, .08, .75);
     microphone_.gainDB = float(std::clamp(_wtoi(setting(L"Gain", L"0").c_str()), -36, 12));
     WNDCLASSEXW klass{sizeof(klass)};
     klass.hInstance = instance_;
@@ -73,6 +82,7 @@ void App::initialize() {
     klass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     klass.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
     klass.hbrBackground = GetSysColorBrush(COLOR_WINDOW);
+    klass.style = CS_DBLCLKS;
     if (!RegisterClassExW(&klass))
         throw std::runtime_error("Cannot register the application window.");
     monitors_ = monitors();
@@ -97,7 +107,7 @@ void App::initialize() {
             source_.name = L"Selected area";
         }
     }
-    overlay_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, klass.lpszClassName, L"YouCam", WS_POPUP,
+    overlay_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED, klass.lpszClassName, L"YouCam", WS_POPUP,
                                selected.work.right - 312, selected.work.bottom - 312, 280, 280, nullptr,
                                nullptr, instance_, this);
     panel_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, klass.lpszClassName, L"YouCam — recording",
@@ -110,7 +120,14 @@ void App::initialize() {
                               L"Recording area", WS_POPUP, 0, 0, 100, 100, nullptr, nullptr, instance_, this);
     editorTools_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, klass.lpszClassName, L"Area controls",
                                    WS_POPUP, 0, 0, 280, 36, nullptr, nullptr, instance_, this);
-    if (!overlay_ || !panel_ || !picker_ || !editor_ || !editorTools_)
+    stage_ = CreateWindowExW(WS_EX_APPWINDOW, klass.lpszClassName, L"YouCam — camera stage",
+                             WS_POPUP, selected.rect.left, selected.rect.top,
+                             rectWidth(selected.rect), rectHeight(selected.rect), nullptr, nullptr,
+                             instance_, this);
+    cropEditor_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, klass.lpszClassName,
+                                  L"YouCam — crop camera", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN,
+                                  0, 0, 900, 650, nullptr, nullptr, instance_, this);
+    if (!overlay_ || !panel_ || !picker_ || !editor_ || !editorTools_ || !stage_ || !cropEditor_)
         throw std::runtime_error("Cannot create YouCam controls.");
     SetLayeredWindowAttributes(picker_, 0, 120, LWA_ALPHA);
     SetLayeredWindowAttributes(editor_, Transparent, 255, LWA_COLORKEY);
@@ -118,12 +135,17 @@ void App::initialize() {
     exclude(picker_);
     exclude(editor_);
     exclude(editorTools_);
+    exclude(cropEditor_);
     status_ = makeControl(panel_, L"STATIC", L"Ready", 0);
     details_ = makeControl(panel_, L"STATIC", L"", 0);
     notice_ = makeControl(panel_, L"STATIC", L"", 0);
     record_ = makeControl(panel_, L"BUTTON", L"Record", Start);
     pause_ = makeControl(panel_, L"BUTTON", L"Pause", Pause);
     sourceButton_ = makeControl(panel_, L"BUTTON", L"Source…", SourceMenu);
+    cameraButton_ = makeControl(panel_, L"BUTTON", L"Camera…", CameraMenu);
+    makeControl(cropEditor_, L"BUTTON", L"Apply crop", CropApply);
+    makeControl(cropEditor_, L"BUTTON", L"Full frame", CropFull);
+    makeControl(cropEditor_, L"BUTTON", L"Cancel", CropCancel);
     makeControl(panel_, L"BUTTON", L"Hide", Panel);
     gain_ = makeControl(panel_, TRACKBAR_CLASSW, L"", 120, TBS_AUTOTICKS);
     SendMessageW(gain_, TBM_SETRANGE, TRUE, MAKELPARAM(-36, 12));
@@ -168,16 +190,20 @@ void App::initialize() {
         selectCamera(cameraID_);
     } else {
         microphoneID_ = L"none";
-        Frame test(640, 480);
-        for (size_t i = 0; i < test.bgra.size(); i += 4) {
-            test.bgra[i] = 180;
-            test.bgra[i + 1] = 100;
-            test.bgra[i + 2] = 35;
-            test.bgra[i + 3] = 255;
-        }
+        Frame test(1280, 720);
+        for (uint32_t row = 0; row < test.height; ++row)
+            for (uint32_t col = 0; col < test.width; ++col) {
+                auto p = &test.bgra[(size_t(row) * test.width + col) * 4];
+                p[0] = uint8_t(50 + 100 * row / test.height);
+                p[1] = uint8_t(70 + 100 * col / test.width);
+                p[2] = uint8_t(130 + 80 * row / test.height);
+                if (col % 160 < 3 || row % 120 < 3) p[0] = p[1] = p[2] = 235;
+                p[3] = 255;
+            }
         camera_.frames.put(std::move(test));
     }
     ShowWindow(overlay_, SW_SHOWNOACTIVATE);
+    renderCamera();
     showEditor();
     SetTimer(overlay_, 1, 33, nullptr);
 }
@@ -189,6 +215,8 @@ void App::saveSettings() {
     };
     RECT r{};
     GetWindowRect(overlay_, &r);
+    if (windowCameraAttached_)
+        r = floatingCameraRect_;
     put(L"Camera", cameraID_);
     put(L"Microphone", microphoneID_);
     put(L"Shape", std::to_wstring(shape_));
@@ -196,7 +224,16 @@ void App::saveSettings() {
     put(L"Gain", std::to_wstring(int(microphone_.gainDB.load())));
     put(L"X", std::to_wstring(r.left));
     put(L"Y", std::to_wstring(r.top));
-    put(L"Width", std::to_wstring(rectWidth(r)));
+    put(L"Width", std::to_wstring(cameraWidth_));
+    put(L"CropLeft", std::to_wstring(int(std::lround(crop_.left * 10000))));
+    put(L"CropTop", std::to_wstring(int(std::lround(crop_.top * 10000))));
+    put(L"CropRight", std::to_wstring(int(std::lround(crop_.right * 10000))));
+    put(L"CropBottom", std::to_wstring(int(std::lround(crop_.bottom * 10000))));
+    put(L"StageScale", std::to_wstring(int(std::lround(stageScale_ * 100))));
+    put(L"WindowCamera", windowCamera_.enabled ? L"1" : L"0");
+    put(L"WindowCameraX", std::to_wstring(int(std::lround(windowCamera_.x * 10000))));
+    put(L"WindowCameraY", std::to_wstring(int(std::lround(windowCamera_.y * 10000))));
+    put(L"WindowCameraSize", std::to_wstring(int(std::lround(windowCamera_.size * 10000))));
     put(L"Source", source_.kind == SourceKind::Camera   ? L"camera"
                    : source_.kind == SourceKind::Region ? L"region"
                                                         : L"screen");
@@ -220,7 +257,7 @@ App::~App() {
     recorder_.stop();
     microphone_.shutdown();
     camera_.shutdown();
-    for (HWND h : {editorTools_, editor_, picker_, panel_, overlay_})
+    for (HWND h : {cropEditor_, stage_, editorTools_, editor_, picker_, panel_, overlay_})
         if (IsWindow(h))
             DestroyWindow(h);
     if (panelFont_)
@@ -282,8 +319,9 @@ void App::layoutPanel() {
     place(notice_, 14, 90, 530, 62);
     place(record_, 14, 160, 105, 30);
     place(pause_, 128, 160, 105, 30);
-    place(sourceButton_, 242, 160, 130, 30);
-    place(GetDlgItem(panel_, Panel), 386, 160, 105, 30);
+    place(sourceButton_, 242, 160, 105, 30);
+    place(cameraButton_, 356, 160, 100, 30);
+    place(GetDlgItem(panel_, Panel), 465, 160, 77, 30);
     place(gain_, 14, 202, 260, 30);
     place(meter_, 290, 208, 100, 18);
     place(GetDlgItem(panel_, Reveal), 400, 202, 142, 30);
@@ -315,12 +353,15 @@ void App::syncMicrophone() {
 void App::selectCamera(const std::wstring &id) {
     if (preview_)
         return;
-    cameraID_ = id;
+    auto selected = std::find_if(cameras_.begin(), cameras_.end(), [&](const Device &d) { return d.id == id; });
+    if (selected == cameras_.end())
+        selected = cameras_.begin();
+    auto actualID = selected == cameras_.end() ? id : selected->id;
+    if (cameraID_ != actualID) crop_ = {};
+    cameraID_ = actualID;
     cameraError_.clear();
     try {
-        camera_.start(id);
-        if (cameraID_.empty() && !cameras_.empty())
-            cameraID_ = cameras_.front().id;
+        camera_.start(cameraID_);
     } catch (const std::exception &e) {
         cameraError_ = e.what();
     }
@@ -329,8 +370,14 @@ void App::selectCamera(const std::wstring &id) {
 void App::update() {
     if (closing_)
         return;
-    if (cameraVisible_)
-        InvalidateRect(overlay_, nullptr, FALSE);
+    syncWindowCamera();
+    if (source_.kind == SourceKind::Window)
+        recorder_.setCameraOverlay(windowCameraSettings());
+    if (source_.kind == SourceKind::Stage)
+        InvalidateRect(stage_, nullptr, FALSE);
+    else if (cameraVisible_ && IsWindowVisible(overlay_))
+        renderCamera();
+    if (cropping_) InvalidateRect(cropEditor_, nullptr, FALSE);
     auto state = recorder_.state();
     bool busy = state.phase != Phase::Idle;
     std::wstring status = L"Ready";
@@ -348,13 +395,16 @@ void App::update() {
         status = L"Saved to Desktop";
     SetWindowTextW(status_, status.c_str());
     std::wstring detail = L"Source: " + (source_.kind == SourceKind::Camera ? L"Camera only" : source_.name);
+    if (windowCameraActive())
+        detail += L" + camera";
     if (camera_.mode.pixels())
-        detail += L"\nCamera: " + dimensions(camera_.mode.width, camera_.mode.height) + L" (maximum)";
+        detail += L"\n" + camera_.name + L" · " + dimensions(camera_.mode.width, camera_.mode.height);
     detail += L" · Mic gain " + std::to_wstring(int(microphone_.gainDB.load())) + L" dB";
     SetWindowTextW(details_, detail.c_str());
     SetWindowTextW(record_, busy ? L"Stop" : L"Record");
     SetWindowTextW(pause_, state.phase == Phase::Paused ? L"Resume" : L"Pause");
-    EnableWindow(record_, !preview_ && state.phase != Phase::Saving && !picking_);
+    EnableWindow(record_, !preview_ && state.phase != Phase::Saving && !picking_ && !cropping_);
+    EnableWindow(cameraButton_, !busy);
     EnableWindow(pause_, state.phase == Phase::Recording || state.phase == Phase::Paused);
     EnableWindow(sourceButton_, state.phase != Phase::Starting && state.phase != Phase::Saving);
     SendMessageW(meter_, PBM_SETPOS, WPARAM(std::min(1.0f, microphone_.peak.load()) * 100), 0);
@@ -377,6 +427,13 @@ void App::update() {
         auto failure = microphone_.error();
         if (!failure.empty())
             recorder_.stop("Microphone stopped: " + failure);
+    }
+    if (busy && source_.kind == SourceKind::Stage && !preview_) {
+        try {
+            camera_.frames.get(true);
+        } catch (const std::exception &e) {
+            recorder_.stop(std::string("Camera stopped: ") + e.what());
+        }
     }
 }
 void App::menu(POINT position, bool sourceOnly) {
@@ -404,8 +461,11 @@ void App::menu(POINT position, bool sourceOnly) {
     for (size_t i = 0; i < windows_.size() && i < 900; ++i)
         append(windowMenu, WindowBase + int(i), escaped(windows_[i].name),
                source_.kind == SourceKind::Window && source_.window == windows_[i].handle);
-    AppendMenuW(sources, MF_POPUP, reinterpret_cast<UINT_PTR>(windowMenu), L"Window");
-    append(sources, CameraOnly, L"Camera only (full frame)", source_.kind == SourceKind::Camera);
+    AppendMenuW(sources, MF_POPUP, reinterpret_cast<UINT_PTR>(windowMenu),
+                windowCamera_.enabled ? L"Window + camera" : L"Window");
+    append(sources, WindowCamera, L"Include webcam in window recordings", windowCamera_.enabled, !busy);
+    append(sources, CameraOnly, crop_.full() ? L"Camera only (full frame)" : L"Camera only (cropped)", source_.kind == SourceKind::Camera);
+    append(sources, Stage, L"Camera stage — full screen\tF11", source_.kind == SourceKind::Stage);
     if (!sourceOnly) {
         append(root, 0, L"YouCam", false, false);
         append(root, Start, busy ? L"Stop recording" : L"Start recording", false,
@@ -418,7 +478,7 @@ void App::menu(POINT position, bool sourceOnly) {
             append(root, Reveal, L"Show last recording");
         AppendMenuW(root, MF_SEPARATOR, 0, nullptr);
         append(root, HideCamera,
-               cameraVisible_ ? (source_.kind == SourceKind::Camera ? L"Hide camera preview" : L"Hide camera")
+               source_.kind == SourceKind::Stage ? L"Exit camera stage\tEsc" : cameraVisible_ ? (source_.kind == SourceKind::Camera || windowCameraActive() ? L"Hide camera preview" : L"Hide camera")
                               : L"Show camera");
         HMENU cameraMenu = CreatePopupMenu();
         try {
@@ -430,8 +490,8 @@ void App::menu(POINT position, bool sourceOnly) {
             append(cameraMenu, 0, L"No camera available", false, false);
         for (size_t i = 0; i < cameras_.size() && i < 900; ++i)
             append(cameraMenu, CameraBase + int(i), escaped(cameras_[i].name), cameraID_ == cameras_[i].id,
-                   !(busy && source_.kind == SourceKind::Camera));
-        append(cameraMenu, Retry, L"Retry camera", false, !(busy && source_.kind == SourceKind::Camera));
+                   !busy);
+        append(cameraMenu, Retry, L"Retry camera", false, !busy);
         AppendMenuW(root, MF_POPUP, reinterpret_cast<UINT_PTR>(cameraMenu), L"Camera (maximum resolution)");
         HMENU audioMenu = CreatePopupMenu();
         append(audioMenu, AudioNone, L"No audio", microphoneID_ == L"none", !busy);
@@ -454,16 +514,22 @@ void App::menu(POINT position, bool sourceOnly) {
         for (int i = 0; i < 4; ++i)
             append(sizes, SizeBase + i, names[i]);
         AppendMenuW(root, MF_POPUP, reinterpret_cast<UINT_PTR>(sizes), L"Size");
+        if (source_.kind == SourceKind::Stage) {
+            append(root, StageLarger, L"Larger camera\t+ / wheel up");
+            append(root, StageSmaller, L"Smaller camera\t- / wheel down");
+        }
         append(root, Mirror, L"Mirror camera", mirrored_, !(busy && source_.kind == SourceKind::Camera));
+        append(root, CropCamera, L"Crop camera…\tDouble-click", false, !busy);
         append(root, Help, L"How to use YouCam");
         if (!shortcuts_)
             append(root, 0, L"Some global shortcuts are unavailable", false, false);
         AppendMenuW(root, MF_SEPARATOR, 0, nullptr);
         append(root, Quit, L"Quit YouCam");
     }
-    SetForegroundWindow(overlay_);
+    HWND owner = source_.kind == SourceKind::Stage ? stage_ : overlay_;
+    SetForegroundWindow(owner);
     int selected = int(
-        TrackPopupMenu(root, TPM_RETURNCMD | TPM_RIGHTBUTTON, position.x, position.y, 0, overlay_, nullptr));
+        TrackPopupMenu(root, TPM_RETURNCMD | TPM_RIGHTBUTTON, position.x, position.y, 0, owner, nullptr));
     DestroyMenu(root);
     PostMessageW(overlay_, WM_NULL, 0, 0);
     if (selected)
@@ -499,11 +565,14 @@ bool App::allowSourceChange() {
 void App::selectSource(Source source) {
     if (!allowSourceChange())
         return;
+    if (source_.kind == SourceKind::Stage && source.kind != SourceKind::Stage)
+        leaveStage();
     source_ = source;
-    if (source_.kind == SourceKind::Camera && !preview_)
+    if ((source_.kind == SourceKind::Camera || windowCameraActive()) && !preview_ && !camera_.mode.pixels())
         selectCamera(cameraID_);
-    if (source_.kind != SourceKind::Camera && !cameraVisible_)
+    if (source_.kind != SourceKind::Camera && source_.kind != SourceKind::Stage && !windowCameraActive() && !cameraVisible_)
         camera_.shutdown();
+    syncWindowCamera();
     saveSettings();
     showEditor();
     update();
@@ -520,6 +589,28 @@ void App::command(int id) {
             POINT point{};
             GetCursorPos(&point);
             menu(point, true);
+        } else if (id == CameraMenu) {
+            POINT point{};
+            GetCursorPos(&point);
+            cameraMenu(point);
+        } else if (id == Stage) {
+            toggleStage();
+        } else if (id == StageLarger || id == StageSmaller) {
+            if (source_.kind == SourceKind::Stage)
+                changeStageScale(id == StageLarger ? .04 : -.04);
+        } else if (id == WindowCamera) {
+            if (recorder_.state().phase != Phase::Idle)
+                return;
+            windowCamera_.enabled = !windowCamera_.enabled;
+            if (windowCameraActive() && !preview_ && !camera_.mode.pixels())
+                selectCamera(cameraID_);
+            syncWindowCamera();
+            saveSettings();
+            update();
+        } else if (id == CropCamera) {
+            beginCrop();
+        } else if (id == CropApply || id == CropFull || id == CropCancel) {
+            finishCrop(id != CropCancel, id == CropFull);
         } else if (id == Quit)
             PostQuitMessage(0);
         else if (id == SelectArea)
@@ -535,17 +626,22 @@ void App::command(int id) {
         } else if (id == CameraOnly)
             selectSource({SourceKind::Camera, source_.monitor, nullptr, {}, L"Camera only", mirrored_});
         else if (id == HideCamera) {
+            if (source_.kind == SourceKind::Stage) {
+                toggleStage();
+                return;
+            }
             cameraVisible_ = !cameraVisible_;
             ShowWindow(overlay_, cameraVisible_ ? SW_SHOWNOACTIVATE : SW_HIDE);
             if (cameraVisible_ && !camera_.mode.pixels())
                 selectCamera(cameraID_);
-            else if (!cameraVisible_ && source_.kind != SourceKind::Camera)
+            else if (!cameraVisible_ && source_.kind != SourceKind::Camera && !windowCameraActive())
                 camera_.shutdown();
         } else if (id == Mirror) {
             mirrored_ = !mirrored_;
             saveSettings();
             InvalidateRect(overlay_, nullptr, FALSE);
         } else if (id == Retry) {
+            if (recorder_.state().phase != Phase::Idle) return;
             cameras_ = Camera::devices();
             selectCamera(cameraID_);
         } else if (id == Reveal) {
@@ -557,8 +653,14 @@ void App::command(int id) {
         } else if (id == Help)
             MessageBoxW(
                 panel_,
+                L"YouCam for Windows - fork of antirez/youcam (MIT).\n"
+                L"https://github.com/antirez/youcam\n\n"
+                L"Choose your webcam from Camera. Your choice is remembered.\n"
                 L"Drag the camera to move it; scroll to resize. Right-click for controls.\n\n"
-                L"Recording source: whole monitor, selected area, a window, or the full camera frame. Drag "
+                L"Double-click the image to crop or restore the full frame. F11 opens the camera stage: "
+                L"scroll to resize the centered card, Esc to leave. The stage records the webcam over "
+                L"the animated monochrome topographic background.\n\n"
+                L"Recording source: whole monitor, selected area, a window, camera frame/crop, or stage. Drag "
                 L"the area corners to resize; drag its top edge to move. Esc cancels selection.\n\n"
                 L"Ctrl+Alt+Shift+R starts/stops. Ctrl+Alt+Shift+P pauses/resumes. Movies save to your "
                 L"Desktop.\n\n"
@@ -572,14 +674,26 @@ void App::command(int id) {
             shape_ = id - ShapeBase;
             RECT r{};
             GetWindowRect(overlay_, &r);
-            resizeCamera(rectWidth(r));
+            resizeCamera(cameraWidth_);
             saveSettings();
         } else if (id >= SizeBase && id < SizeBase + 4) {
             int widths[] = {180, 280, 400, 560};
-            resizeCamera(widths[id - SizeBase]);
+            if (source_.kind == SourceKind::Stage) {
+                double scales[] = {.4, .6, .8, .96};
+                changeStageScale(scales[id - SizeBase] - stageScale_);
+            } else if (windowCameraActive()) {
+                double scales[] = {.16, .24, .34, .45};
+                windowCamera_.size = scales[id - SizeBase];
+                syncWindowCamera();
+                recorder_.setCameraOverlay(windowCameraSettings());
+            } else {
+                resizeCamera(widths[id - SizeBase]);
+            }
             saveSettings();
-        } else if (id >= CameraBase && id < CameraBase + int(cameras_.size()))
-            selectCamera(cameras_[id - CameraBase].id);
+        } else if (id >= CameraBase && id < CameraBase + int(cameras_.size())) {
+            if (recorder_.state().phase == Phase::Idle)
+                selectCamera(cameras_[id - CameraBase].id);
+        }
         else if (id == AudioNone || (id >= AudioBase && id < AudioBase + int(microphones_.size()))) {
             if (recorder_.state().phase != Phase::Idle)
                 return;
@@ -600,30 +714,33 @@ void App::command(int id) {
     }
 }
 void App::toggleRecording() {
-    if (preview_ || picking_)
+    if (preview_ || picking_ || cropping_)
         return;
     if (recorder_.state().phase != Phase::Idle) {
         recorder_.stop();
         update();
         return;
     }
-    if (source_.kind == SourceKind::Camera && !camera_.frames.get(true))
+    if ((source_.kind == SourceKind::Camera || source_.kind == SourceKind::Stage || windowCameraActive()) && !camera_.frames.get(true))
         throw std::runtime_error("Wait for the full-resolution camera image before recording.");
-    if (source_.kind == SourceKind::Window && (!IsWindow(source_.window) || hiddenWindow(source_.window)))
+    if (windowSource(source_.kind) && (!IsWindow(source_.window) || hiddenWindow(source_.window)))
         throw std::runtime_error("Restore the selected window before recording.");
     source_.mirror = source_.kind == SourceKind::Camera && mirrored_;
+    source_.crop = source_.kind == SourceKind::Camera ? crop_ : Crop{};
+    source_.cameraOverlay = source_.kind == SourceKind::Window ? windowCameraSettings() : CameraOverlay{};
     ShowWindow(editor_, SW_HIDE);
     ShowWindow(editorTools_, SW_HIDE);
     noticeText_.clear();
     SetWindowTextW(notice_, L"");
-    recorder_.start(source_, &camera_.frames, microphoneID_ != L"none", nextMoviePath());
+    recorder_.start(source_, source_.kind == SourceKind::Stage ? &stageFrames_ : &camera_.frames,
+                    microphoneID_ != L"none", nextMoviePath());
     syncMicrophone();
     update();
 }
 void App::togglePause() {
     auto state = recorder_.state();
     if (state.phase == Phase::Paused) {
-        if (source_.kind == SourceKind::Window && (!IsWindow(source_.window) || hiddenWindow(source_.window)))
+        if (windowSource(source_.kind) && (!IsWindow(source_.window) || hiddenWindow(source_.window)))
             throw std::runtime_error("Restore the selected window before resuming.");
         recorder_.resume();
     } else
@@ -631,64 +748,36 @@ void App::togglePause() {
     update();
 }
 void App::resizeCamera(int width) {
+    if (windowCameraActive()) {
+        syncWindowCamera();
+        renderCamera();
+        return;
+    }
     RECT bounds = monitorBounds(overlay_);
     double aspect = shape_ == 2 ? 16.0 / 9.0 : 1.0;
     width =
-        std::clamp(width, 120, std::min(960, std::min(rectWidth(bounds), int(rectHeight(bounds) * aspect))));
+        std::clamp(width, 120, std::max(120, std::min(960,
+                   std::min(rectWidth(bounds) - 2 * ShadowMargin,
+                            int((rectHeight(bounds) - 2 * ShadowMargin) * aspect)))));
+    cameraWidth_ = width;
     int height = int(width / aspect);
     RECT current{};
     GetWindowRect(overlay_, &current);
+    width += 2 * ShadowMargin;
+    height += 2 * ShadowMargin;
     RECT rect{current.left, current.top, current.left + width, current.top + height};
     rect = constrained(rect, bounds);
     SetWindowPos(overlay_, HWND_TOPMOST, rect.left, rect.top, width, height, SWP_NOACTIVATE);
-    HRGN mask = shape_ == 0 ? CreateEllipticRgn(0, 0, width, height) : CreateRectRgn(0, 0, width, height);
-    if (!SetWindowRgn(overlay_, mask, TRUE))
-        DeleteObject(mask);
-    InvalidateRect(overlay_, nullptr, TRUE);
+    renderCamera();
 }
 void App::paintCamera(HDC dc) {
-    RECT area{};
-    GetClientRect(overlay_, &area);
-    FillRect(dc, &area, GetSysColorBrush(COLOR_WINDOWTEXT));
-    std::shared_ptr<const Frame> frame;
-    std::wstring message = preview_ ? L"Preview" : L"Starting camera…";
-    try {
-        frame = camera_.frames.get();
-    } catch (const std::exception &e) {
-        message = wide(e.what());
-    }
-    if (!cameraError_.empty())
-        message = wide(cameraError_);
-    if (frame) {
-        BITMAPINFO info{};
-        info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-        info.bmiHeader.biWidth = frame->width;
-        info.bmiHeader.biHeight = -LONG(frame->height);
-        info.bmiHeader.biPlanes = 1;
-        info.bmiHeader.biBitCount = 32;
-        info.bmiHeader.biCompression = BI_RGB;
-        double scale =
-            std::max(double(rectWidth(area)) / frame->width, double(rectHeight(area)) / frame->height);
-        int sw = std::min(int(frame->width), int(rectWidth(area) / scale)),
-            sh = std::min(int(frame->height), int(rectHeight(area) / scale));
-        int sx = (int(frame->width) - sw) / 2, sy = (int(frame->height) - sh) / 2;
-        SetStretchBltMode(dc, HALFTONE);
-        SetBrushOrgEx(dc, 0, 0, nullptr);
-        StretchDIBits(dc, mirrored_ ? rectWidth(area) : 0, 0, mirrored_ ? -rectWidth(area) : rectWidth(area),
-                      rectHeight(area), sx, sy, sw, sh, frame->bgra.data(), &info, DIB_RGB_COLORS, SRCCOPY);
-    } else {
-        SetBkMode(dc, TRANSPARENT);
-        SetTextColor(dc, RGB(245, 245, 245));
-        area.left += 24;
-        area.right -= 24;
-        area.top += 40;
-        area.bottom -= 20;
-        DrawTextW(dc, message.c_str(), -1, &area, DT_CENTER | DT_WORDBREAK);
-    }
+    (void)dc;
+    renderCamera();
 }
 void App::beginSelection() {
     if (!allowSourceChange())
         return;
+    if (source_.kind == SourceKind::Stage) leaveStage();
     ShowWindow(editor_, SW_HIDE);
     ShowWindow(editorTools_, SW_HIDE);
     selection_ = {};
@@ -793,13 +882,22 @@ LRESULT CALLBACK App::procedure(HWND window, UINT message, WPARAM wparam, LPARAM
     return DefWindowProcW(window, message, wparam, lparam);
 }
 LRESULT App::dispatch(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
-    if (message == WM_ERASEBKGND && (window == overlay_ || window == picker_ || window == editor_))
+    if (message == WM_CAPTURECHANGED) {
+        if (window == cropEditor_) cropDragging_ = false;
+        else dragging_ = false;
+    }
+    if (message == WM_ERASEBKGND && (window == overlay_ || window == picker_ || window == editor_ ||
+                                    window == stage_ || window == cropEditor_))
         return 1;
     if (message == WM_PAINT) {
         PAINTSTRUCT paint{};
         HDC dc = BeginPaint(window, &paint);
         if (window == overlay_)
             paintCamera(dc);
+        else if (window == stage_)
+            paintStage(dc);
+        else if (window == cropEditor_)
+            paintCrop(dc);
         else if (window == picker_ || window == editor_)
             paintRegion(window, dc);
         else
@@ -809,6 +907,40 @@ LRESULT App::dispatch(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
     }
     if (message == WM_COMMAND) {
         command(LOWORD(wparam));
+        return 0;
+    }
+    if (message == WM_DEVICECHANGE && wparam == DBT_DEVNODES_CHANGED && window == overlay_ && !preview_) {
+        cameras_ = Camera::devices();
+        if (recorder_.state().phase == Phase::Idle &&
+            std::none_of(cameras_.begin(), cameras_.end(), [&](const Device &d) { return d.id == cameraID_; }))
+            selectCamera(cameraID_);
+        return 0;
+    }
+    if (window == cropEditor_) {
+        if (message == WM_KEYDOWN && (wparam == VK_ESCAPE || wparam == VK_RETURN)) {
+            finishCrop(wparam == VK_RETURN);
+            return 0;
+        }
+        if (message == WM_LBUTTONDOWN || message == WM_MOUSEMOVE || message == WM_LBUTTONUP) {
+            cropInput(message, lparam);
+            return 0;
+        }
+    }
+    if (message == WM_KEYDOWN && (window == stage_ || window == overlay_ || window == panel_)) {
+        if (window == stage_ && (wparam == VK_ADD || wparam == VK_OEM_PLUS ||
+                                 wparam == VK_SUBTRACT || wparam == VK_OEM_MINUS)) {
+            changeStageScale(wparam == VK_ADD || wparam == VK_OEM_PLUS ? .04 : -.04);
+            return 0;
+        }
+        if (wparam == VK_F11 || (wparam == VK_ESCAPE && window == stage_)) {
+            toggleStage();
+            return 0;
+        }
+    }
+    if (message == WM_LBUTTONDBLCLK && (window == overlay_ || window == stage_)) {
+        dragging_ = false;
+        ReleaseCapture();
+        beginCrop();
         return 0;
     }
     if (message == WM_HSCROLL && reinterpret_cast<HWND>(lparam) == gain_) {
@@ -838,7 +970,11 @@ LRESULT App::dispatch(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
         return 0;
     }
     if (message == WM_CLOSE) {
-        if (window == panel_)
+        if (window == cropEditor_)
+            finishCrop(false);
+        else if (window == stage_)
+            toggleStage();
+        else if (window == panel_)
             showPanel(false);
         else if (window == picker_)
             endSelection(false);
@@ -861,10 +997,19 @@ LRESULT App::dispatch(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
         return 0;
     }
     if (message == WM_MOUSEWHEEL && window == overlay_) {
-        RECT r{};
-        GetWindowRect(overlay_, &r);
-        resizeCamera(rectWidth(r) + GET_WHEEL_DELTA_WPARAM(wparam) / 4);
+        if (windowCameraActive()) {
+            windowCamera_.size = std::clamp(windowCamera_.size + GET_WHEEL_DELTA_WPARAM(wparam) / 6000.0,
+                                            .08, .75);
+            syncWindowCamera();
+            recorder_.setCameraOverlay(windowCameraSettings());
+        } else {
+            resizeCamera(cameraWidth_ + GET_WHEEL_DELTA_WPARAM(wparam) / 4);
+        }
         saveSettings();
+        return 0;
+    }
+    if (message == WM_MOUSEWHEEL && window == stage_) {
+        changeStageScale(GET_WHEEL_DELTA_WPARAM(wparam) / 3000.0);
         return 0;
     }
     if (message == WM_NCHITTEST && window == editor_) {
@@ -909,6 +1054,10 @@ LRESULT App::dispatch(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
         GetCursorPos(&point);
         int dx = point.x - dragStart_.x, dy = point.y - dragStart_.y;
         if (window == overlay_) {
+            if (windowCameraActive()) {
+                moveWindowCamera({dragRect_.left + dx + ShadowMargin, dragRect_.top + dy + ShadowMargin});
+                return 0;
+            }
             RECT r = dragRect_;
             OffsetRect(&r, dx, dy);
             MONITORINFO info{sizeof(info)};
@@ -950,6 +1099,7 @@ LRESULT App::dispatch(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
         return 0;
     }
     if (message == WM_DPICHANGED) {
+        if (window == stage_ || window == cropEditor_) return 0;
         // Region geometry is already in physical pixels. Scaling the editor
         // with the suggested UI rectangle would misrepresent the saved area.
         if (window == editor_ || window == editorTools_) {
@@ -964,10 +1114,14 @@ LRESULT App::dispatch(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
         if (window == panel_)
             layoutPanel();
         else if (window == overlay_)
-            resizeCamera(rectWidth(*rect));
+            resizeCamera(rectWidth(*rect) - 2 * ShadowMargin);
         return 0;
     }
     if (message == WM_DISPLAYCHANGE && window == overlay_) {
+        if (source_.kind == SourceKind::Stage) {
+            recorder_.stop();
+            leaveStage();
+        }
         if (source_.kind == SourceKind::Screen || source_.kind == SourceKind::Region)
             recorder_.stop();
         monitors_ = monitors();
