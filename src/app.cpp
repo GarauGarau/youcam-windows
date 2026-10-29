@@ -1,4 +1,5 @@
 #include "app.h"
+#include "resources.h"
 #include <windowsx.h>
 #include <iomanip>
 #include <dbt.h>
@@ -80,7 +81,12 @@ void App::initialize() {
     klass.lpfnWndProc = procedure;
     klass.lpszClassName = L"YouCamNative";
     klass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    klass.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    klass.hIcon = static_cast<HICON>(LoadImageW(instance_, MAKEINTRESOURCEW(IDI_YOUCAM), IMAGE_ICON,
+                                               GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_SHARED));
+    klass.hIconSm = static_cast<HICON>(LoadImageW(instance_, MAKEINTRESOURCEW(IDI_YOUCAM), IMAGE_ICON,
+                                                 GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_SHARED));
+    if (!klass.hIcon || !klass.hIconSm)
+        throw std::runtime_error("Cannot load the application icon.");
     klass.hbrBackground = GetSysColorBrush(COLOR_WINDOW);
     klass.style = CS_DBLCLKS;
     if (!RegisterClassExW(&klass))
@@ -174,7 +180,7 @@ void App::initialize() {
     tray_.uID = 1;
     tray_.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     tray_.uCallbackMessage = TrayMessage;
-    tray_.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    tray_.hIcon = klass.hIconSm;
     wcscpy_s(tray_.szTip, L"YouCam");
     Shell_NotifyIconW(NIM_ADD, &tray_);
     const UINT modifiers = MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_NOREPEAT;
