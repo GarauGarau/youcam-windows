@@ -195,7 +195,9 @@ int fixture(bool stage = false) {
                       rectWidth(r), rectHeight(r), nullptr, nullptr, c.hInstance, nullptr);
     if (!window)
         return 1;
-    if (stage) SetTimer(window, 1, 60, nullptr);
+    // Keep supplying frames after the capture pool is resized. A completely
+    // static fixture can stop producing updates on software-composited CI desktops.
+    SetTimer(window, 1, 60, nullptr);
     MSG m{};
     while (GetMessageW(&m, nullptr, 0, 0) > 0) {
         TranslateMessage(&m);
