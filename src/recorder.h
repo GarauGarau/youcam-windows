@@ -10,6 +10,7 @@ class Movie {
     bool audioEnabled_ = false;
     bool audioStarted_ = false;
     int64_t videoFrames_ = 0;
+    std::vector<uint8_t> videoBuffer_;
     AudioFormat audioFormat_;
     WaveMaster master_;
     std::filesystem::path masterPath_;

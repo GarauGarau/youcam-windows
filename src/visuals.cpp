@@ -93,14 +93,19 @@ Frame topography(int width, int height, double seconds) {
               ny = (height + step - 1) / step + 1;
     std::vector<double> field(size_t(nx) * ny);
     double t = seconds * .035;
-    for (int y = 0; y < ny; ++y)
+    const double horizontal = .7 * std::sin(t), vertical = .6 * std::cos(t * .7);
+    for (int y = 0; y < ny; ++y) {
+        const double v = double(y * step) / height * 5.0;
+        const double bend = .4 * std::sin(v + t), ridge = .7 * std::cos(v * 1.1 - t);
+        const double b = v - 2.0 - vertical;
         for (int x = 0; x < nx; ++x) {
-            double u = double(x * step) / height * 5.0, v = double(y * step) / height * 5.0;
-            double a = u - 2.5 - .7 * std::sin(t), b = v - 2.0 - .6 * std::cos(t * .7);
-            field[size_t(y) * nx + x] = std::sin(u * .85 + .4 * std::sin(v + t)) +
-                .7 * std::cos(v * 1.1 - t) + .35 * std::sin(u * 1.6 + v * .9 + t * .5) +
+            double u = double(x * step) / height * 5.0;
+            double a = u - 2.5 - horizontal;
+            field[size_t(y) * nx + x] = std::sin(u * .85 + bend) +
+                ridge + .35 * std::sin(u * 1.6 + v * .9 + t * .5) +
                 1.6 * std::exp(-(a * a + b * b) / 2.4);
         }
+    }
     for (int level = -20; level <= 30; ++level) {
         double value = level * .14;
         GraphicsPath path;

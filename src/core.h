@@ -97,10 +97,18 @@ inline Frame fitFrame(const Frame &input, uint32_t width, uint32_t height, bool 
         height - input.height <= 1) {
         for (uint32_t y = 0; y < height; ++y) {
             auto sy = std::min(y, input.height - 1);
+            if (!mirror) {
+                const auto row = input.bgra.data() + size_t(sy) * input.width * 4;
+                auto destination = out.bgra.data() + size_t(y) * width * 4;
+                std::copy_n(row, size_t(input.width) * 4, destination);
+                if (width > input.width)
+                    std::copy_n(row + size_t(input.width - 1) * 4, 4,
+                                destination + size_t(input.width) * 4);
+                continue;
+            }
             for (uint32_t x = 0; x < width; ++x) {
                 auto sx = std::min(x, input.width - 1);
-                if (mirror)
-                    sx = input.width - 1 - sx;
+                sx = input.width - 1 - sx;
                 std::copy_n(&input.bgra[(size_t(sy) * input.width + sx) * 4], 4,
                             &out.bgra[(size_t(y) * width + x) * 4]);
             }
@@ -111,15 +119,16 @@ inline Frame fitFrame(const Frame &input, uint32_t width, uint32_t height, bool 
     auto dw = std::max(1u, uint32_t(input.width * scale));
     auto dh = std::max(1u, uint32_t(input.height * scale));
     uint32_t ox = (width - dw) / 2, oy = (height - dh) / 2;
-    for (uint32_t y = 0; y < dh; ++y)
+    for (uint32_t y = 0; y < dh; ++y) {
+        auto sy = std::min(input.height - 1, uint32_t(uint64_t(y) * input.height / dh));
         for (uint32_t x = 0; x < dw; ++x) {
             auto sx = std::min(input.width - 1, uint32_t(uint64_t(x) * input.width / dw));
-            auto sy = std::min(input.height - 1, uint32_t(uint64_t(y) * input.height / dh));
             if (mirror)
                 sx = input.width - 1 - sx;
             std::copy_n(&input.bgra[(size_t(sy) * input.width + sx) * 4], 4,
                         &out.bgra[(size_t(y + oy) * width + x + ox) * 4]);
         }
+    }
     return out;
 }
 // Convert decoded camera NV12 directly. The Source Reader's basic RGB converter
@@ -174,11 +183,12 @@ inline void fromNV12(Frame &out, const uint8_t *pixels, size_t stride,
         }
     }
 }
-inline std::vector<uint8_t> toNV12(const Frame &frame) {
+inline void toNV12(const Frame &frame, std::vector<uint8_t> &output) {
     const auto w = frame.width, h = frame.height;
     if ((w | h) & 1)
         throw std::runtime_error("NV12 requires even dimensions.");
-    std::vector<uint8_t> output(size_t(w) * h * 3 / 2);
+    // Every byte is written below; retain storage across recording frames.
+    output.resize(size_t(w) * h * 3 / 2);
     auto limit = [](int v) { return uint8_t(std::clamp(v, 0, 255)); };
     // Limited-range BT.709, matching the media type passed to Media Foundation.
     for (uint32_t y = 0; y < h; y += 2)
@@ -199,6 +209,10 @@ inline std::vector<uint8_t> toNV12(const Frame &frame) {
             output[uv] = limit(((-26 * r - 87 * g + 112 * b + 128) >> 8) + 128);
             output[uv + 1] = limit(((112 * r - 102 * g - 10 * b + 128) >> 8) + 128);
         }
+}
+inline std::vector<uint8_t> toNV12(const Frame &frame) {
+    std::vector<uint8_t> output;
+    toNV12(frame, output);
     return output;
 }
 class Timeline {

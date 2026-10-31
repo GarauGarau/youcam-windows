@@ -167,6 +167,16 @@ void Camera::read() {
                          MFNominalRange_0_255;
         LONG defaultStride = LONG(MFGetAttributeUINT32(type.Get(), MF_MT_DEFAULT_STRIDE,
                                                        mode.width * (nv12 ? 1 : 4)));
+        // Both Media Foundation buffer layouts use the same pixel conversion.
+        // Callers normalize the row origin; a negative RGB stride stays valid.
+        auto decode = [&](Frame &frame, const BYTE *top, LONG stride) {
+            if (nv12)
+                fromNV12(frame, top, size_t(stride), bt709, fullRange);
+            else
+                for (UINT32 y = 0; y < mode.height; ++y)
+                    std::memcpy(&frame.bgra[size_t(y) * mode.width * 4], top + ptrdiff_t(y) * stride,
+                                size_t(mode.width) * 4);
+        };
         while (!stop_) {
             DWORD flags = 0;
             LONGLONG timestamp = 0;
@@ -216,13 +226,7 @@ void Camera::read() {
                     twoDimensional->Unlock2D();
                     throw std::runtime_error("Invalid camera NV12 stride.");
                 }
-                if (nv12)
-                    fromNV12(frame, pixels, size_t(stride), bt709, fullRange);
-                else {
-                    for (UINT32 y = 0; y < mode.height; ++y)
-                        std::memcpy(&frame.bgra[size_t(y) * mode.width * 4], pixels + ptrdiff_t(y) * stride,
-                                    size_t(mode.width) * 4);
-                }
+                decode(frame, pixels, stride);
                 twoDimensional->Unlock2D();
             } else {
                 DWORD length = 0;
@@ -232,14 +236,8 @@ void Camera::read() {
                     buffer->Unlock();
                     throw std::runtime_error("Incomplete full-resolution camera frame.");
                 }
-                if (nv12)
-                    fromNV12(frame, pixels, size_t(stride), bt709, fullRange);
-                else {
-                    BYTE *top = stride < 0 ? pixels + size_t(mode.height - 1) * size_t(-stride) : pixels;
-                    for (UINT32 y = 0; y < mode.height; ++y)
-                        std::memcpy(&frame.bgra[size_t(y) * mode.width * 4], top + ptrdiff_t(y) * stride,
-                                    size_t(mode.width) * 4);
-                }
+                BYTE *top = !nv12 && stride < 0 ? pixels + size_t(mode.height - 1) * size_t(-stride) : pixels;
+                decode(frame, top, stride);
                 buffer->Unlock();
             }
             frames.put(std::move(frame));
