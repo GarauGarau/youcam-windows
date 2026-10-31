@@ -398,7 +398,7 @@ void App::update() {
         status = std::wstring(state.phase == Phase::Paused ? L"Paused · " : L"Recording · ") + time;
         status += L" · " + dimensions(state.width, state.height) + L" · " + state.codec;
     } else if (!state.saved.empty())
-        status = L"Saved to Desktop";
+        status = state.audioMaster.empty() ? L"Saved to Desktop" : L"Saved MP4 + WAV to Desktop";
     SetWindowTextW(status_, status.c_str());
     std::wstring detail = L"Source: " + (source_.kind == SourceKind::Camera ? L"Camera only" : source_.name);
     if (windowCameraActive())
@@ -425,6 +425,8 @@ void App::update() {
         auto message = wide(state.error);
         if (!state.saved.empty())
             message += (message.empty() ? L"" : L"\n") + std::wstring(L"Saved: ") + state.saved.wstring();
+        if (!state.audioMaster.empty())
+            message += L"\nAudio: " + state.audioMaster.wstring();
         if (!message.empty())
             notify(message);
         showEditor();
@@ -738,8 +740,23 @@ void App::toggleRecording() {
     ShowWindow(editorTools_, SW_HIDE);
     noticeText_.clear();
     SetWindowTextW(notice_, L"");
+    AudioFormat audioFormat;
+    if (microphoneID_ != L"none") {
+        if (!micRunning_) {
+            microphone_.start(microphoneID_);
+            micRunning_ = true;
+        }
+        // Start the movie only once its channel count and sample rate are known.
+        try {
+            audioFormat = microphone_.format();
+        } catch (...) {
+            microphone_.shutdown();
+            micRunning_ = false;
+            throw;
+        }
+    }
     recorder_.start(source_, source_.kind == SourceKind::Stage ? &stageFrames_ : &camera_.frames,
-                    microphoneID_ != L"none", nextMoviePath());
+                    microphoneID_ != L"none", nextMoviePath(), audioFormat);
     syncMicrophone();
     update();
 }

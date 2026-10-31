@@ -46,10 +46,10 @@ void Movie::open(const std::filesystem::path &path, uint32_t width, uint32_t hei
         check(MFCreateMediaType(&compressed), "Create AAC type");
         compressed->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
         compressed->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_AAC);
-        compressed->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 1);
-        compressed->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, 48000);
+        compressed->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, std::min<uint32_t>(2, audioFormat_.channels));
+        compressed->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, audioFormat_.rate == 44100 ? 44100 : 48000);
         compressed->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
-        compressed->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 16000);
+        compressed->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 24000);
         compressed->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, 1);
         compressed->SetUINT32(MF_MT_AAC_PAYLOAD_TYPE, 0);
         compressed->SetUINT32(MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, 0x29);
@@ -57,12 +57,13 @@ void Movie::open(const std::filesystem::path &path, uint32_t width, uint32_t hei
         ComPtr<IMFMediaType> pcm;
         check(MFCreateMediaType(&pcm), "Create audio format");
         pcm->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
-        pcm->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
-        pcm->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 1);
-        pcm->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, 48000);
-        pcm->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
-        pcm->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, 2);
-        pcm->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 96000);
+        pcm->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_Float);
+        pcm->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, audioFormat_.channels);
+        pcm->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, audioFormat_.rate);
+        pcm->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 32);
+        pcm->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, audioFormat_.channels * 4);
+        pcm->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, audioFormat_.rate * audioFormat_.channels * 4);
+        pcm->SetUINT32(MF_MT_AUDIO_CHANNEL_MASK, audioFormat_.channelMask);
         check(writer_->SetInputMediaType(audio_, pcm.Get(), nullptr), "Connect microphone encoder");
     }
     check(writer_->BeginWriting(), "Start native video encoder");
@@ -73,7 +74,13 @@ void Movie::open(const std::filesystem::path &path, uint32_t width, uint32_t hei
     audioStarted_ = false;
     videoFrames_ = 0;
 }
-void Movie::start(const std::filesystem::path &path, uint32_t width, uint32_t height, bool audio) {
+void Movie::start(const std::filesystem::path &path, uint32_t width, uint32_t height, bool audio, AudioFormat format) {
+    audioFormat_ = format;
+    masterPath_.clear();
+    if (audio) {
+        master_.open(wavePath(path), format);
+        masterPath_ = wavePath(path);
+    }
     std::string error;
     // Preserve dimensions for every attempt. Allow Windows to select a GPU MFT,
     // then try its software H.264 encoder; HEVC can support larger GPU modes.
@@ -130,33 +137,48 @@ void Movie::video(const Frame &frame, int64_t timestamp, int64_t duration) {
         ++videoFrames_;
     }
 }
-void Movie::audio(const std::vector<int16_t> &samples, int64_t timestamp) {
+void Movie::audio(const std::vector<float> &samples, int64_t timestamp) {
     if (!audioEnabled_ || samples.empty())
         return;
+    master_.append(samples, timestamp);
+    const auto rate = audioFormat_.rate;
+    const auto channels = audioFormat_.channels;
     if (!audioStarted_) {
         // Microphone startup can lag video. Represent that real delay with
         // silence, so editors see both tracks beginning at zero, without
         // relying on an MP4 edit list or moving speech earlier.
-        const int64_t silenceSamples = std::max<int64_t>(0, timestamp * 48000 / 10000000);
-        std::vector<int16_t> silence(4800, 0);
+        const int64_t silenceSamples = std::max<int64_t>(0, timestamp * rate / 10000000);
+        std::vector<float> silence(size_t(rate / 10) * channels, 0);
         for (int64_t written = 0; written < silenceSamples;) {
-            const auto count = std::min<int64_t>(int64_t(silence.size()), silenceSamples - written);
-            const auto time = written * 10000000 / 48000;
-            const auto end = (written + count) * 10000000 / 48000;
-            sample(audio_, silence.data(), size_t(count) * 2, time, end - time);
+            const auto count = std::min<int64_t>(int64_t(silence.size() / channels), silenceSamples - written);
+            const auto time = written * 10000000 / rate;
+            const auto end = (written + count) * 10000000 / rate;
+            sample(audio_, silence.data(), size_t(count) * channels * 4, time, end - time);
             written += count;
         }
         audioStarted_ = true;
     }
-    sample(audio_, samples.data(), samples.size() * 2, timestamp,
-           int64_t(samples.size()) * 10000000 / 48000);
+    sample(audio_, samples.data(), samples.size() * 4, timestamp,
+           int64_t(samples.size() / channels) * 10000000 / rate);
 }
 void Movie::finish() {
-    if (!writer_)
-        return;
-    HRESULT hr = writer_->Finalize();
-    writer_.Reset();
-    check(hr, "Finalize MP4 recording");
+    std::exception_ptr waveError;
+    try { master_.finish(videoFrames_ ? (videoFrames_ * 10000000 + 29) / 30 : -1); }
+    catch (...) { waveError = std::current_exception(); }
+    if (writer_) {
+        HRESULT hr = writer_->Finalize();
+        writer_.Reset();
+        check(hr, "Finalize MP4 recording");
+    }
+    if (waveError) std::rethrow_exception(waveError);
+}
+void Movie::discardEmptyMaster() {
+    if (!masterPath_.empty()) {
+        master_.finish();
+        std::error_code ignored;
+        std::filesystem::remove(masterPath_, ignored);
+        masterPath_.clear();
+    }
 }
 std::filesystem::path nextMoviePath() {
     PWSTR desktop = nullptr;
@@ -169,7 +191,7 @@ std::filesystem::path nextMoviePath() {
     swprintf_s(name, L"YouCam-%04u%02u%02u-%02u%02u%02u", time.wYear, time.wMonth, time.wDay, time.wHour,
                time.wMinute, time.wSecond);
     auto path = directory / (std::wstring(name) + L".mp4");
-    for (int suffix = 2; std::filesystem::exists(path); ++suffix)
+    for (int suffix = 2; std::filesystem::exists(path) || std::filesystem::exists(wavePath(path)); ++suffix)
         path = directory / (std::wstring(name) + L"-" + std::to_wstring(suffix) + L".mp4");
     return path;
 }
@@ -180,13 +202,14 @@ RecordingState Recorder::state() const {
         result.elapsed = timeline_.time(clock100ns());
     return result;
 }
-void Recorder::start(Source source, Frames *camera, bool audio, const std::filesystem::path &path) {
+void Recorder::start(Source source, Frames *camera, bool audio, const std::filesystem::path &path, AudioFormat format) {
     if (state().phase != Phase::Idle)
         return;
     if (thread_.joinable())
         thread_.join();
     {
         std::lock_guard lock(mutex_);
+        audioFormat_ = format;
         state_ = {};
         state_.serial = ++serial_;
         state_.phase = Phase::Starting;
@@ -234,20 +257,23 @@ void Recorder::stop(const std::string &error) {
     if (thread_.joinable())
         thread_.join();
 }
-void Recorder::audio(std::vector<int16_t> samples, int64_t timestamp) {
+void Recorder::audio(std::vector<float> samples, int64_t timestamp) {
     std::lock_guard lock(mutex_);
     if (state_.phase != Phase::Recording || stop_)
         return;
+    const auto rate = audioFormat_.rate;
+    const auto channels = audioFormat_.channels;
+    if (samples.size() % channels) return;
     // A packet straddling Start/Resume may contain samples from the pause.
     if (timestamp < activeSince_) {
-        size_t trim = size_t(((activeSince_ - timestamp) * 48000 + 9999999) / 10000000);
+        size_t trim = size_t(((activeSince_ - timestamp) * rate + 9999999) / 10000000) * channels;
         if (trim >= samples.size())
             return;
         samples.erase(samples.begin(), samples.begin() + trim);
-        timestamp += int64_t(trim) * 10000000 / 48000;
+        timestamp += int64_t(trim / channels) * 10000000 / rate;
     }
     queuedSamples_ += samples.size();
-    if (queuedSamples_ > 48000 * 5) {
+    if (queuedSamples_ > size_t(rate) * channels * 5) {
         state_.error = "The encoder cannot keep up with full-resolution recording.";
         stop_ = true;
         timeline_.pause(clock100ns());
@@ -291,7 +317,7 @@ void Recorder::run(Source source, Frames *camera, bool withAudio, std::filesyste
         auto region = cropPixels(first->width, first->height,
                                  source.kind == SourceKind::Camera ? source.crop : Crop{});
         auto width = evenExtent(region.width), height = evenExtent(region.height);
-        movie.start(path, width, height, withAudio);
+        movie.start(path, width, height, withAudio, audioFormat_);
         {
             std::lock_guard lock(mutex_);
             state_.width = width;
@@ -324,7 +350,7 @@ void Recorder::run(Source source, Frames *camera, bool withAudio, std::filesyste
             for (auto &packet : packets) {
                 auto time = std::max(packet.time, audioEnd);
                 movie.audio(packet.samples, time);
-                audioEnd = time + int64_t(packet.samples.size()) * 10000000 / 48000;
+                audioEnd = time + int64_t(packet.samples.size() / audioFormat_.channels) * 10000000 / audioFormat_.rate;
             }
             if (stopping)
                 break;
@@ -427,6 +453,7 @@ void Recorder::run(Source source, Frames *camera, bool withAudio, std::filesyste
         if (wroteVideo) {
             std::lock_guard lock(mutex_);
             state_.saved = path;
+            if (withAudio) state_.audioMaster = wavePath(path);
         }
     } catch (const std::exception &error) {
         std::lock_guard lock(mutex_);
@@ -435,6 +462,7 @@ void Recorder::run(Source source, Frames *camera, bool withAudio, std::filesyste
     if (!wroteVideo) {
         std::error_code ignored;
         std::filesystem::remove(path, ignored);
+        try { movie.discardEmptyMaster(); } catch (...) {}
     }
     {
         std::lock_guard lock(mutex_);
