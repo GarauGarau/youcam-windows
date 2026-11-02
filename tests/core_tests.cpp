@@ -43,6 +43,27 @@ int main() {
         require(cropMirror.bgra[0] == 15, "Mirror must operate within the selected crop.");
         auto full = cropFrame(grid, {});
         require(full.bgra == grid.bgra, "Full frame must restore every original pixel.");
+        Frame landscape(65, 37); // Cross the rotation tile boundary in both axes.
+        landscape.capturedAt = 7654321;
+        for (size_t i = 0; i < landscape.bgra.size(); ++i) landscape.bgra[i] = uint8_t(i * 71);
+        for (int turn : {1, 2, 3}) {
+            auto rotated = rotateFrame(landscape, turn);
+            require(rotated.width == (turn == 2 ? 65u : 37u) &&
+                    rotated.height == (turn == 2 ? 37u : 65u) && rotated.capturedAt == landscape.capturedAt,
+                    "Rotation must preserve full resolution and the audio synchronization timestamp.");
+            require(rotateFrame(rotated, 4 - turn).bgra == landscape.bgra,
+                    "Rotation must preserve every channel of every pixel, including odd edges.");
+        }
+        auto clockwise = rotateFrame(grid, 1), counterclockwise = rotateFrame(grid, 3);
+        require(clockwise.bgra[0] == 50 && clockwise.bgra[5 * 4] == 0 &&
+                clockwise.bgra[7 * 6 * 4] == 57 && counterclockwise.bgra[0] == 7 &&
+                counterclockwise.bgra[5 * 4] == 57, "Quarter turns must have the correct direction.");
+        auto portraitCrop = cropFrame(clockwise, {1.0 / 6, .25, 5.0 / 6, .75});
+        require(portraitCrop.width == 4 && portraitCrop.height == 4 && portraitCrop.bgra[0] == 42 &&
+                portraitCrop.bgra[15 * 4] == 15, "Portrait crops must use coordinates after rotation.");
+        require(portraitTurns(3840, 2160) == 1 && portraitTurns(2160, 3840) == 0 &&
+                portraitTurns(3840, 2160, true) == 3 && portraitTurns(2160, 3840, true) == 2 &&
+                portraitTurns(720, 720) == 0, "Native portrait frames must not be rotated a second time.");
         auto flipped = mirroredCrop({0, .2, .25, .8});
         require(flipped.left == .75 && flipped.right == 1 && flipped.top == .2,
                 "A mirrored selection must map back to the original sensor coordinates.");

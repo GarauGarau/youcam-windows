@@ -70,6 +70,11 @@ void App::initialize() {
                         _wtoi(setting(L"CropTop", L"0").c_str()) / 10000.0,
                         _wtoi(setting(L"CropRight", L"10000").c_str()) / 10000.0,
                         _wtoi(setting(L"CropBottom", L"10000").c_str()) / 10000.0 });
+    portraitCrop_ = validCrop({ _wtoi(setting(L"PortraitCropLeft", L"0").c_str()) / 10000.0,
+                                _wtoi(setting(L"PortraitCropTop", L"0").c_str()) / 10000.0,
+                                _wtoi(setting(L"PortraitCropRight", L"10000").c_str()) / 10000.0,
+                                _wtoi(setting(L"PortraitCropBottom", L"10000").c_str()) / 10000.0 });
+    portraitReverse_ = setting(L"PortraitReverse", L"0") != L"0";
     stageScale_ = std::clamp(_wtoi(setting(L"StageScale", L"68").c_str()) / 100.0, StageMinimum, StageMaximum);
     windowCamera_.enabled = setting(L"WindowCamera", L"1") != L"0";
     windowCamera_.x = std::clamp(_wtoi(setting(L"WindowCameraX", L"10000").c_str()) / 10000.0, 0.0, 1.0);
@@ -102,6 +107,8 @@ void App::initialize() {
     auto mode = setting(L"Source", L"screen");
     if (mode == L"camera")
         source_.kind = SourceKind::Camera;
+    if (mode == L"portrait")
+        source_ = {SourceKind::Portrait, selected.handle, nullptr, {}, L"Vertical camera"};
     if (mode == L"region") {
         RECT area{_wtoi(setting(L"Left").c_str()), _wtoi(setting(L"Top").c_str()),
                   _wtoi(setting(L"Right").c_str()), _wtoi(setting(L"Bottom").c_str())};
@@ -235,12 +242,18 @@ void App::saveSettings() {
     put(L"CropTop", std::to_wstring(int(std::lround(crop_.top * 10000))));
     put(L"CropRight", std::to_wstring(int(std::lround(crop_.right * 10000))));
     put(L"CropBottom", std::to_wstring(int(std::lround(crop_.bottom * 10000))));
+    put(L"PortraitCropLeft", std::to_wstring(int(std::lround(portraitCrop_.left * 10000))));
+    put(L"PortraitCropTop", std::to_wstring(int(std::lround(portraitCrop_.top * 10000))));
+    put(L"PortraitCropRight", std::to_wstring(int(std::lround(portraitCrop_.right * 10000))));
+    put(L"PortraitCropBottom", std::to_wstring(int(std::lround(portraitCrop_.bottom * 10000))));
+    put(L"PortraitReverse", portraitReverse_ ? L"1" : L"0");
     put(L"StageScale", std::to_wstring(int(std::lround(stageScale_ * 100))));
     put(L"WindowCamera", windowCamera_.enabled ? L"1" : L"0");
     put(L"WindowCameraX", std::to_wstring(int(std::lround(windowCamera_.x * 10000))));
     put(L"WindowCameraY", std::to_wstring(int(std::lround(windowCamera_.y * 10000))));
     put(L"WindowCameraSize", std::to_wstring(int(std::lround(windowCamera_.size * 10000))));
     put(L"Source", source_.kind == SourceKind::Camera   ? L"camera"
+                   : portraitMode()                    ? L"portrait"
                    : source_.kind == SourceKind::Region ? L"region"
                                                         : L"screen");
     for (const auto &m : monitors_)
@@ -363,7 +376,12 @@ void App::selectCamera(const std::wstring &id) {
     if (selected == cameras_.end())
         selected = cameras_.begin();
     auto actualID = selected == cameras_.end() ? id : selected->id;
-    if (cameraID_ != actualID) crop_ = {};
+    if (cameraID_ != actualID) {
+        crop_ = portraitCrop_ = {};
+        portraitReverse_ = false;
+    }
+    portraitInput_.reset();
+    portraitFrame_.reset();
     cameraID_ = actualID;
     cameraError_.clear();
     try {
@@ -473,6 +491,7 @@ void App::menu(POINT position, bool sourceOnly) {
                 windowCamera_.enabled ? L"Window + camera" : L"Window");
     append(sources, WindowCamera, L"Include webcam in window recordings", windowCamera_.enabled, !busy);
     append(sources, CameraOnly, crop_.full() ? L"Camera only (full frame)" : L"Camera only (cropped)", source_.kind == SourceKind::Camera);
+    append(sources, CameraPortrait, L"Vertical camera (video + audio + WAV)", portraitMode());
     append(sources, Stage, L"Camera stage — full screen\tF11", source_.kind == SourceKind::Stage);
     if (!sourceOnly) {
         append(root, 0, L"YouCam", false, false);
@@ -486,7 +505,7 @@ void App::menu(POINT position, bool sourceOnly) {
             append(root, Reveal, L"Show last recording");
         AppendMenuW(root, MF_SEPARATOR, 0, nullptr);
         append(root, HideCamera,
-               source_.kind == SourceKind::Stage ? L"Exit camera stage\tEsc" : cameraVisible_ ? (source_.kind == SourceKind::Camera || windowCameraActive() ? L"Hide camera preview" : L"Hide camera")
+               source_.kind == SourceKind::Stage ? L"Exit camera stage\tEsc" : cameraVisible_ ? (cameraSource(source_.kind) || windowCameraActive() ? L"Hide camera preview" : L"Hide camera")
                               : L"Show camera");
         HMENU cameraMenu = CreatePopupMenu();
         try {
@@ -512,11 +531,13 @@ void App::menu(POINT position, bool sourceOnly) {
             append(audioMenu, AudioBase + int(i), escaped(microphones_[i].name),
                    microphoneID_ == microphones_[i].id, !busy);
         AppendMenuW(root, MF_POPUP, reinterpret_cast<UINT_PTR>(audioMenu), L"Audio input");
-        HMENU shapes = CreatePopupMenu();
-        append(shapes, ShapeBase, L"Circle", shape_ == 0);
-        append(shapes, ShapeBase + 1, L"Square", shape_ == 1);
-        append(shapes, ShapeBase + 2, L"Rectangle (16:9)", shape_ == 2);
-        AppendMenuW(root, MF_POPUP, reinterpret_cast<UINT_PTR>(shapes), L"Shape");
+        if (!portraitMode()) {
+            HMENU shapes = CreatePopupMenu();
+            append(shapes, ShapeBase, L"Circle", shape_ == 0);
+            append(shapes, ShapeBase + 1, L"Square", shape_ == 1);
+            append(shapes, ShapeBase + 2, L"Rectangle (16:9)", shape_ == 2);
+            AppendMenuW(root, MF_POPUP, reinterpret_cast<UINT_PTR>(shapes), L"Shape");
+        }
         HMENU sizes = CreatePopupMenu();
         const wchar_t *names[] = {L"Small", L"Medium", L"Large", L"Extra large"};
         for (int i = 0; i < 4; ++i)
@@ -526,7 +547,10 @@ void App::menu(POINT position, bool sourceOnly) {
             append(root, StageLarger, L"Larger camera\t+ / wheel up");
             append(root, StageSmaller, L"Smaller camera\t- / wheel down");
         }
-        append(root, Mirror, L"Mirror camera", mirrored_, !(busy && source_.kind == SourceKind::Camera));
+        if (portraitMode())
+            append(root, PortraitReverse, L"Flip vertical camera 180°", portraitReverse_, !busy);
+        else
+            append(root, Mirror, L"Mirror camera", mirrored_, !(busy && source_.kind == SourceKind::Camera));
         append(root, CropCamera, L"Crop camera…\tDouble-click", false, !busy);
         append(root, Help, L"How to use YouCam");
         if (!shortcuts_)
@@ -576,11 +600,12 @@ void App::selectSource(Source source) {
     if (source_.kind == SourceKind::Stage && source.kind != SourceKind::Stage)
         leaveStage();
     source_ = source;
-    if ((source_.kind == SourceKind::Camera || windowCameraActive()) && !preview_ && !camera_.mode.pixels())
+    if ((cameraSource(source_.kind) || windowCameraActive()) && !preview_ && !camera_.mode.pixels())
         selectCamera(cameraID_);
-    if (source_.kind != SourceKind::Camera && source_.kind != SourceKind::Stage && !windowCameraActive() && !cameraVisible_)
+    if (!cameraSource(source_.kind) && source_.kind != SourceKind::Stage && !windowCameraActive() && !cameraVisible_)
         camera_.shutdown();
     syncWindowCamera();
+    resizeCamera(cameraWidth_);
     saveSettings();
     showEditor();
     update();
@@ -633,18 +658,30 @@ void App::command(int id) {
             selectSource({SourceKind::Screen, monitor, nullptr, info.rcMonitor, info.szDevice});
         } else if (id == CameraOnly)
             selectSource({SourceKind::Camera, source_.monitor, nullptr, {}, L"Camera only", mirrored_});
-        else if (id == HideCamera) {
+        else if (id == CameraPortrait) {
+            selectSource({SourceKind::Portrait, source_.monitor, nullptr, {}, L"Vertical camera"});
+            showPanel();
+        } else if (id == PortraitReverse) {
+            if (!portraitMode() || cropping_ || recorder_.state().phase != Phase::Idle) return;
+            portraitReverse_ = !portraitReverse_;
+            // Keep the same physical region selected after turning the image.
+            portraitCrop_ = {1 - portraitCrop_.right, 1 - portraitCrop_.bottom,
+                              1 - portraitCrop_.left, 1 - portraitCrop_.top};
+            resizeCamera(cameraWidth_);
+            saveSettings();
+        } else if (id == HideCamera) {
             if (source_.kind == SourceKind::Stage) {
                 toggleStage();
                 return;
             }
             cameraVisible_ = !cameraVisible_;
             ShowWindow(overlay_, cameraVisible_ ? SW_SHOWNOACTIVATE : SW_HIDE);
-            if (cameraVisible_ && !camera_.mode.pixels())
+            if (cameraVisible_ && !preview_ && !camera_.mode.pixels())
                 selectCamera(cameraID_);
-            else if (!cameraVisible_ && source_.kind != SourceKind::Camera && !windowCameraActive())
+            else if (!cameraVisible_ && !cameraSource(source_.kind) && !windowCameraActive())
                 camera_.shutdown();
         } else if (id == Mirror) {
+            if (portraitMode() || (cameraSource(source_.kind) && recorder_.state().phase != Phase::Idle)) return;
             mirrored_ = !mirrored_;
             saveSettings();
             InvalidateRect(overlay_, nullptr, FALSE);
@@ -670,6 +707,10 @@ void App::command(int id) {
                 L"the animated monochrome topographic background.\n\n"
                 L"Recording source: whole monitor, selected area, a window, camera frame/crop, or stage. Drag "
                 L"the area corners to resize; drag its top edge to move. Esc cancels selection.\n\n"
+                L"Vertical camera records the plain camera image with microphone audio and a separate "
+                L"uncompressed WAV. Turn the camera before recording; landscape pixels rotate 90° and "
+                L"portrait pixels stay upright. Use Flip vertical camera 180° if upside down, and "
+                L"double-click to crop.\n\n"
                 L"Ctrl+Alt+Shift+R starts/stops. Ctrl+Alt+Shift+P pauses/resumes. Movies save to your "
                 L"Desktop.\n\n"
                 L"Camera capture uses the highest resolution reported by its driver. Screen capture uses "
@@ -679,6 +720,7 @@ void App::command(int id) {
                 L"recorded.",
                 L"YouCam", MB_OK);
         else if (id >= ShapeBase && id < ShapeBase + 3) {
+            if (portraitMode()) return;
             shape_ = id - ShapeBase;
             RECT r{};
             GetWindowRect(overlay_, &r);
@@ -729,12 +771,13 @@ void App::toggleRecording() {
         update();
         return;
     }
-    if ((source_.kind == SourceKind::Camera || source_.kind == SourceKind::Stage || windowCameraActive()) && !camera_.frames.get(true))
+    if ((cameraSource(source_.kind) || source_.kind == SourceKind::Stage || windowCameraActive()) && !camera_.frames.get(true))
         throw std::runtime_error("Wait for the full-resolution camera image before recording.");
     if (windowSource(source_.kind) && (!IsWindow(source_.window) || hiddenWindow(source_.window)))
         throw std::runtime_error("Restore the selected window before recording.");
     source_.mirror = source_.kind == SourceKind::Camera && mirrored_;
-    source_.crop = source_.kind == SourceKind::Camera ? crop_ : Crop{};
+    source_.crop = cameraSource(source_.kind) ? cameraCrop() : Crop{};
+    source_.portraitReverse = portraitMode() && portraitReverse_;
     source_.cameraOverlay = source_.kind == SourceKind::Window ? windowCameraSettings() : CameraOverlay{};
     ShowWindow(editor_, SW_HIDE);
     ShowWindow(editorTools_, SW_HIDE);
@@ -777,13 +820,15 @@ void App::resizeCamera(int width) {
         return;
     }
     RECT bounds = monitorBounds(overlay_);
-    double aspect = shape_ == 2 ? 16.0 / 9.0 : 1.0;
+    auto frame = portraitMode() ? cameraFrame() : nullptr;
+    double aspect = cameraAspect(frame.get());
+    int minimum = portraitMode() ? 1 : 120;
     width =
-        std::clamp(width, 120, std::max(120, std::min(960,
+        std::clamp(width, minimum, std::max(minimum, std::min(960,
                    std::min(rectWidth(bounds) - 2 * ShadowMargin,
                             int((rectHeight(bounds) - 2 * ShadowMargin) * aspect)))));
     cameraWidth_ = width;
-    int height = int(width / aspect);
+    int height = std::max(1, int(width / aspect));
     RECT current{};
     GetWindowRect(overlay_, &current);
     width += 2 * ShadowMargin;
@@ -1148,7 +1193,7 @@ LRESULT App::dispatch(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
         if (source_.kind == SourceKind::Screen || source_.kind == SourceKind::Region)
             recorder_.stop();
         monitors_ = monitors();
-        if (!monitors_.empty() && source_.kind != SourceKind::Camera && source_.kind != SourceKind::Window) {
+        if (!monitors_.empty() && !cameraSource(source_.kind) && source_.kind != SourceKind::Window) {
             auto m = monitors_.front();
             source_ = {SourceKind::Screen, m.handle, nullptr, m.rect, m.name};
             showEditor();

@@ -88,6 +88,28 @@ inline Frame cropFrame(const Frame &input, Crop crop) {
                     &out.bgra[size_t(y) * r.width * 4]);
     return out;
 }
+// A landscape stream from a physically turned camera needs a quarter turn.
+// Drivers already supplying portrait pixels keep their native orientation.
+inline int portraitTurns(uint32_t width, uint32_t height, bool reverse = false) {
+    return (width > height ? 1 : 0) + (reverse ? 2 : 0);
+}
+inline Frame rotateFrame(const Frame &input, int turns) {
+    turns = ((turns % 4) + 4) % 4;
+    if (!turns) return input;
+    Frame out(turns % 2 ? input.height : input.width, turns % 2 ? input.width : input.height);
+    out.capturedAt = input.capturedAt;
+    // Tile the transpose to keep both source and destination rows in cache.
+    for (uint32_t by = 0; by < input.height; by += 32)
+        for (uint32_t bx = 0; bx < input.width; bx += 32)
+            for (uint32_t y = by; y < std::min(by + 32, input.height); ++y)
+                for (uint32_t x = bx; x < std::min(bx + 32, input.width); ++x) {
+                    uint32_t dx = turns == 1 ? input.height - 1 - y : turns == 2 ? input.width - 1 - x : y;
+                    uint32_t dy = turns == 1 ? x : turns == 2 ? input.height - 1 - y : input.width - 1 - x;
+                    std::copy_n(&input.bgra[(size_t(y) * input.width + x) * 4], 4,
+                                &out.bgra[(size_t(dy) * out.width + dx) * 4]);
+                }
+    return out;
+}
 // Fit is used only for a resized window. Screen and camera recordings retain
 // every source pixel; an odd edge is duplicated to satisfy 4:2:0 encoders.
 inline Frame fitFrame(const Frame &input, uint32_t width, uint32_t height, bool mirror = false) {

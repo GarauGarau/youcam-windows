@@ -10,6 +10,7 @@ Fork of [antirez/youcam](https://github.com/antirez/youcam), adapted for **Windo
 
 - Rewritten in C++ using native Windows APIs.
 - Record a screen, an area, a window with an optional webcam overlay, or the webcam alone.
+- Vertical camera recording with a plain portrait preview and optional frame crop.
 - Full-resolution capture and MP4 recording at a constant 30 fps.
 - Webcam cropping, rounded corners and shadows.
 - Full-screen camera stage with an animated background.
@@ -25,6 +26,17 @@ Drag to move, scroll to resize, double-click to crop. Right-click for settings. 
 - **F11 / Esc:** open / close the camera stage.
 - **Ctrl+Alt+Shift+R:** start / stop recording.
 - **Ctrl+Alt+Shift+P:** pause / resume.
+
+For a physically rotated camera such as an OBSBOT, choose **Recording source → Vertical camera (video + audio + WAV)**.
+Turn the camera before starting: a landscape stream is rotated 90° clockwise at full resolution
+(for example, 3840 × 2160 becomes 2160 × 3840); a native portrait stream keeps its orientation.
+If the picture is upside down, right-click and choose **Flip vertical camera 180°**.
+Double-click to crop the upright frame, then **Apply crop**; **Full frame** restores it.
+The preview follows the crop's proportions. This mode records only the camera pixels, with no
+mirroring, shapes, borders or background. Its crop is remembered separately from the other camera modes.
+Select your microphone in **Audio input** to save an MP4 with audio and the matching uncompressed
+float32 WAV on the Desktop. **No audio** saves only the video. Rotate and crop before recording;
+if the camera changes stream dimensions during recording, the current video is saved and a new recording is needed.
 
 ## Audio for editing
 

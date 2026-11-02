@@ -61,7 +61,7 @@ class Recorder {
         stop();
     }
     // For Stage, pass the rendered scene frames; nullptr retains WGC capture.
-    // For Camera/Window, pass the webcam's native frames.
+    // For Camera/Portrait/Window, pass the webcam's native frames.
     void start(Source, Frames *camera, bool audio, const std::filesystem::path &, AudioFormat = {});
     void stop(const std::string &error = "");
     void pause(const std::string &reason = "");

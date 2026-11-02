@@ -34,7 +34,8 @@ std::shared_ptr<const Frame> awaitPixels(Frames &frames, Predicate predicate, co
     }
     throw std::runtime_error(message);
 }
-void inspectMovie(const std::filesystem::path &path, UINT32 width, UINT32 height, bool audio) {
+void inspectMovie(const std::filesystem::path &path, UINT32 width, UINT32 height, bool audio,
+                  const Frame *expected = nullptr) {
     ComPtr<IMFSourceReader> reader;
     check(MFCreateSourceReaderFromURL(path.c_str(), nullptr, &reader), "Open saved MP4");
     ComPtr<IMFMediaType> type;
@@ -57,6 +58,7 @@ void inspectMovie(const std::filesystem::path &path, UINT32 width, UINT32 height
           "Configure native video decoder");
     reader->SetStreamSelection(DWORD(MF_SOURCE_READER_ALL_STREAMS), FALSE);
     reader->SetStreamSelection(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), TRUE);
+    auto reference = expected ? toNV12(*expected) : std::vector<uint8_t>{};
     int count = 0;
     for (;;) {
         ComPtr<IMFSample> sample;
@@ -65,6 +67,32 @@ void inspectMovie(const std::filesystem::path &path, UINT32 width, UINT32 height
         check(reader->ReadSample(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), 0, nullptr, &flags, &t, &sample),
               "Decode saved video");
         if (sample) {
+            if (expected && count == 0) {
+                ComPtr<IMFMediaType> actual;
+                check(reader->GetCurrentMediaType(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), &actual),
+                      "Read portrait decoder layout");
+                ComPtr<IMFMediaBuffer> buffer;
+                check(sample->ConvertToContiguousBuffer(&buffer), "Read portrait pixels");
+                ComPtr<IMF2DBuffer> plane;
+                BYTE *pixels = nullptr;
+                LONG stride = LONG(MFGetAttributeUINT32(actual.Get(), MF_MT_DEFAULT_STRIDE, width));
+                bool twoDimensional = SUCCEEDED(buffer.As(&plane));
+                if (twoDimensional) check(plane->Lock2D(&pixels, &stride), "Lock portrait plane");
+                else {
+                    DWORD length = 0;
+                    check(buffer->Lock(&pixels, nullptr, &length), "Lock portrait pixels");
+                    if (stride <= 0 || uint64_t(stride) * height > length) {
+                        buffer->Unlock();
+                        throw std::runtime_error("Unexpected portrait decoder layout.");
+                    }
+                }
+                bool matches = true;
+                for (auto y : {height / 4, height * 3 / 4}) for (auto x : {width / 4, width * 3 / 4})
+                    matches &= std::abs(int(pixels[ptrdiff_t(y) * stride + x]) - reference[size_t(y) * width + x]) < 12;
+                if (twoDimensional) plane->Unlock2D();
+                else buffer->Unlock();
+                require(matches, "Encoded portrait pixels do not match the upright crop.");
+            }
             require(std::abs(t - int64_t(count) * 10000000 / 30) < 400,
                     "Full-resolution output must be continuous 30 fps CFR from zero.");
             LONGLONG duration = 0;
@@ -253,7 +281,7 @@ int wmain(int argc, wchar_t **argv) {
         auto directory = std::filesystem::temp_directory_path() /
                          (L"YouCam native è '" + std::to_wstring(GetCurrentProcessId()));
         std::filesystem::create_directories(directory);
-        for (auto size : {std::pair{640u, 480u}, std::pair{3840u, 2160u}}) {
+        for (auto size : {std::pair{640u, 480u}, std::pair{3840u, 2160u}, std::pair{2160u, 3840u}}) {
             Frame frame(size.first, size.second);
             for (size_t i = 0; i < frame.bgra.size(); i += 4) {
                 frame.bgra[i] = 40;
@@ -319,6 +347,54 @@ int wmain(int argc, wchar_t **argv) {
             recorder.stop();
             require(recorder.state().error.empty(), recorder.state().error.c_str());
             inspectMovie(cropPath, 98, 98, false);
+        }
+        for (bool nativePortrait : {false, true}) for (bool reverse : {false, true}) {
+            Frame input(nativePortrait ? 181 : 321, nativePortrait ? 321 : 181);
+            for (uint32_t y = 0; y < input.height; ++y) for (uint32_t x = 0; x < input.width; ++x) {
+                const auto offset = (size_t(y) * input.width + x) * 4;
+                auto gray = uint8_t(30 + (x >= input.width / 2 ? 60 : 0) + (y >= input.height / 2 ? 120 : 0));
+                input.bgra[offset] = input.bgra[offset + 1] = input.bgra[offset + 2] = gray;
+                input.bgra[offset + 3] = 255;
+            }
+            Source source{SourceKind::Portrait, nullptr, nullptr, {}, L"Synthetic vertical camera"};
+            source.portraitReverse = reverse;
+            source.crop = reverse ? Crop{.1, .2, .9, .8} : Crop{};
+            auto oriented = rotateFrame(input, portraitTurns(input.width, input.height, reverse));
+            auto cropped = cropFrame(oriented, source.crop);
+            auto expected = fitFrame(cropped, evenExtent(cropped.width), evenExtent(cropped.height));
+            Frames camera;
+            camera.put(std::move(input));
+            Recorder recorder;
+            auto path = directory / (std::wstring(nativePortrait ? L"native-portrait" : L"turned-portrait") +
+                                     (reverse ? L"-reverse.mp4" : L".mp4"));
+            bool audio = !nativePortrait || reverse;
+            recorder.start(source, &camera, audio, path, {48000, 2, 3});
+            for (int i = 0; i < 250 && recorder.state().phase == Phase::Starting; ++i) Sleep(20);
+            require(recorder.state().phase == Phase::Recording, recorder.state().error.c_str());
+            for (int i = 0; i < 8; ++i) {
+                if (audio) recorder.audio(std::vector<float>(3200, .1234567f), clock100ns());
+                Sleep(34);
+            }
+            recorder.stop();
+            auto state = recorder.state();
+            require(state.error.empty(), state.error.c_str());
+            require(state.saved == path, "Portrait recording was not saved.");
+            inspectMovie(path, expected.width, expected.height, audio, &expected);
+            if (audio) {
+                require(state.audioMaster == wavePath(path), "Portrait WAV must accompany the MP4.");
+                ComPtr<IMFSourceReader> reader;
+                check(MFCreateSourceReaderFromURL(state.audioMaster.c_str(), nullptr, &reader), "Open portrait WAV");
+                ComPtr<IMFMediaType> sound;
+                check(reader->GetNativeMediaType(DWORD(MF_SOURCE_READER_FIRST_AUDIO_STREAM), 0, &sound),
+                      "Read portrait WAV format");
+                GUID subtype{};
+                sound->GetGUID(MF_MT_SUBTYPE, &subtype);
+                require(subtype == MFAudioFormat_Float && MFGetAttributeUINT32(sound.Get(), MF_MT_AUDIO_BITS_PER_SAMPLE, 0) == 32 &&
+                        MFGetAttributeUINT32(sound.Get(), MF_MT_AUDIO_NUM_CHANNELS, 0) == 2 &&
+                        MFGetAttributeUINT32(sound.Get(), MF_MT_AUDIO_SAMPLES_PER_SECOND, 0) == 48000,
+                        "Portrait WAV must preserve uncompressed float32 and native rate/channels.");
+            } else require(state.audioMaster.empty() && !std::filesystem::exists(wavePath(path)),
+                           "Video-only portrait must not produce a WAV.");
         }
         if (winrt::Windows::Graphics::Capture::GraphicsCaptureSession::IsSupported()) {
             auto displays = monitors();

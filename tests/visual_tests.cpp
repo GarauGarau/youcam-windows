@@ -41,6 +41,15 @@ int wmain(int argc, wchar_t **argv) {
             require(translucent > 1000 && tile.bgra[3] == 0, "Every shape needs a soft transparent shadow.");
             if (argc > 1) saveBitmap(tile, std::filesystem::path(argv[1]) / (L"shape-" + std::to_wstring(shape) + L".png"));
         }
+        auto portrait = rotateFrame(camera, 1);
+        auto plain = cameraTile(&portrait, 180, 320, PlainCameraShape, {}, false);
+        for (uint32_t y = 0; y < plain.height; ++y) for (uint32_t x = 0; x < plain.width; ++x) {
+            bool inside = x >= ShadowMargin && x < ShadowMargin + 180 &&
+                          y >= ShadowMargin && y < ShadowMargin + 320;
+            require(plain.bgra[(size_t(y) * plain.width + x) * 4 + 3] == (inside ? 255 : 0),
+                    "Portrait preview must have square opaque corners, no mask and no shadow.");
+        }
+        if (argc > 1) saveBitmap(plain, std::filesystem::path(argv[1]) / L"portrait.png");
         auto terrain = topography(1280, 800, 0);
         auto moved = topography(1280, 800, 8);
         require(terrain.bgra != moved.bgra, "Topographic background must animate.");

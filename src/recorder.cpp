@@ -296,7 +296,7 @@ void Recorder::run(Source source, Frames *camera, bool withAudio, std::filesyste
             drawing = std::make_unique<Drawing>();
         Frames *frames = camera;
         const bool directStage = source.kind == SourceKind::Stage && camera;
-        if (source.kind != SourceKind::Camera && !directStage) {
+        if (!cameraSource(source.kind) && !directStage) {
             capture.start(source);
             frames = capture.frames.get();
         }
@@ -304,7 +304,7 @@ void Recorder::run(Source source, Frames *camera, bool withAudio, std::filesyste
             throw std::runtime_error("No camera source is available.");
         std::shared_ptr<const Frame> first;
         auto deadline = clock100ns() + 50000000;
-        while (!(first = frames->get(source.kind == SourceKind::Camera || directStage))) {
+        while (!(first = frames->get(cameraSource(source.kind) || directStage))) {
             {
                 std::lock_guard lock(mutex_);
                 if (stop_)
@@ -314,8 +314,11 @@ void Recorder::run(Source source, Frames *camera, bool withAudio, std::filesyste
                 throw std::runtime_error("No full-resolution frame arrived from the selected source.");
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
-        auto region = cropPixels(first->width, first->height,
-                                 source.kind == SourceKind::Camera ? source.crop : Crop{});
+        const int turns = source.kind == SourceKind::Portrait
+                            ? portraitTurns(first->width, first->height, source.portraitReverse) : 0;
+        auto region = cropPixels(turns % 2 ? first->height : first->width,
+                                 turns % 2 ? first->width : first->height,
+                                 cameraSource(source.kind) ? source.crop : Crop{});
         auto width = evenExtent(region.width), height = evenExtent(region.height);
         movie.start(path, width, height, withAudio, audioFormat_);
         {
@@ -368,7 +371,7 @@ void Recorder::run(Source source, Frames *camera, bool withAudio, std::filesyste
             const auto frameNumber = elapsed * 30 / 10000000;
             if (frameNumber < nextFrame)
                 continue;
-            auto frame = frames->get(source.kind == SourceKind::Camera || directStage);
+            auto frame = frames->get(cameraSource(source.kind) || directStage);
             if (!frame)
                 continue;
             nextFrame = frameNumber + 1;
@@ -378,6 +381,10 @@ void Recorder::run(Source source, Frames *camera, bool withAudio, std::filesyste
                     "The source resolution changed. Start a new recording to use the new native resolution.");
             Frame transformed;
             const Frame *pixels = frame.get();
+            if (turns) {
+                transformed = rotateFrame(*pixels, turns);
+                pixels = &transformed;
+            }
             if (source.kind == SourceKind::Window && overlay.enabled) {
                 auto cameraFrame = camera ? camera->get(true) : nullptr;
                 if (!cameraFrame)
@@ -385,8 +392,8 @@ void Recorder::run(Source source, Frames *camera, bool withAudio, std::filesyste
                 transformed = composeWindow(*frame, *cameraFrame, overlay);
                 pixels = &transformed;
             }
-            if (source.kind == SourceKind::Camera && !source.crop.full()) {
-                transformed = cropFrame(*frame, source.crop);
+            if (cameraSource(source.kind) && !source.crop.full()) {
+                transformed = cropFrame(*pixels, source.crop);
                 pixels = &transformed;
             }
             if (pixels->width != width || pixels->height != height || source.mirror) {
@@ -396,7 +403,7 @@ void Recorder::run(Source source, Frames *camera, bool withAudio, std::filesyste
             // Camera and composed-camera images must share the microphone's
             // capture clock. Assigning the encoder's current time here shifts
             // speech by the entire camera/decode/render delay.
-            bool timedCamera = source.kind == SourceKind::Camera || directStage ||
+            bool timedCamera = cameraSource(source.kind) || directStage ||
                                (source.kind == SourceKind::Window && overlay.enabled);
             int64_t videoTime = frameNumber * 10000000 / 30;
             if (timedCamera && pixels->capturedAt) {

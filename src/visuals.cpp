@@ -55,7 +55,7 @@ Frame cameraTile(const Frame *frame, int width, int height, int shape, Crop crop
         SolidBrush black(Color(255, 24, 24, 24));
         g.FillRectangle(&black, area);
         if (frame)
-            drawImage(g, *frame, area, crop, mirror, true);
+            drawImage(g, *frame, area, crop, mirror, shape != PlainCameraShape);
         else {
             Font font(L"Segoe UI", 13, FontStyleRegular, UnitPixel);
             SolidBrush ink(Color(255, 225, 225, 225));
@@ -66,6 +66,8 @@ Frame cameraTile(const Frame *frame, int width, int height, int shape, Crop crop
             g.DrawString(message.c_str(), -1, &font, textArea, &format, &ink);
         }
     }
+    // The portrait preview shows the entire crop with square corners and no shadow.
+    if (shape == PlainCameraShape) return out;
     // Premultiplied alpha gives every shape a real translucent soft shadow.
     // A signed-distance edge also avoids jagged circle/rounded-rectangle masks.
     for (uint32_t y = 0; y < out.height; ++y)

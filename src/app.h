@@ -39,6 +39,10 @@ class App {
     bool shortcuts_ = false;
     bool preview_ = false;
     Crop crop_, pendingCrop_;
+    Crop portraitCrop_;
+    bool portraitReverse_ = false;
+    std::shared_ptr<const Frame> portraitInput_, portraitFrame_;
+    int portraitTurns_ = -1;
     bool cropping_ = false, cropDragging_ = false;
     int cropHandle_ = -1, cameraWidth_ = 280;
     POINT cropStart_{};
@@ -88,6 +92,10 @@ class App {
     void paintCrop(HDC);
     void cropInput(UINT, LPARAM);
     std::shared_ptr<const Frame> cameraFrame();
+    bool portraitMode() const { return source_.kind == SourceKind::Portrait; }
+    Crop &cameraCrop() { return portraitMode() ? portraitCrop_ : crop_; }
+    bool cameraMirror() const { return !portraitMode() && mirrored_; }
+    double cameraAspect(const Frame *) const;
     void paintRegion(HWND, HDC);
     void notify(const std::wstring &);
     static LRESULT CALLBACK procedure(HWND, UINT, WPARAM, LPARAM);
