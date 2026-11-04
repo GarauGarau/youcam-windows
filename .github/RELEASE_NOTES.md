@@ -6,6 +6,8 @@ Download **YouCam.exe** below and run it. No installation needed. The ZIP also i
 - Screen, area, window with optional webcam overlay, webcam only, and full-screen camera stage.
 - Webcam cropping, shadows and an animated stage background.
 - Full-resolution MP4 recording at a constant 30 fps, microphone audio and pause/resume.
+- Lossless float32 WAV master beside each video, with native microphone channels and sample rate; use this file for audio editing.
+- WASAPI RAW capture where available, unclipped software gain, and 192 kb/s AAC in the MP4.
 - Choose any available webcam; the app remembers your choice without preferring a brand.
 - YC application icon with a transparent background, including the window and system tray icons.
 

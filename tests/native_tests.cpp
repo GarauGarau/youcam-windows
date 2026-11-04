@@ -268,7 +268,7 @@ int wmain(int argc, wchar_t **argv) {
             for (int i = 0; i < 3; ++i) {
                 movie.video(frame, int64_t(i) * 10000000 / 30, 10000000 / 30);
                 if (audio)
-                    movie.audio(std::vector<int16_t>(1600, 1200), int64_t(i) * 10000000 / 30);
+                    movie.audio(std::vector<float>(1600, 1200.0f / 32768), int64_t(i) * 10000000 / 30);
             }
             movie.finish();
             inspectMovie(path, size.first, size.second, audio);
@@ -294,7 +294,7 @@ int wmain(int argc, wchar_t **argv) {
                 Sleep(20);
             require(recorder.state().phase == Phase::Recording, recorder.state().error.c_str());
             for (int i = 0; i < 6; ++i) {
-                recorder.audio(std::vector<int16_t>(1600, 100), clock100ns());
+                recorder.audio(std::vector<float>(1600, 100.0f / 32768), clock100ns());
                 Sleep(34);
             }
             recorder.pause();
@@ -303,7 +303,7 @@ int wmain(int argc, wchar_t **argv) {
             require(recorder.state().elapsed == paused, "Camera pause must freeze time.");
             recorder.resume();
             for (int i = 0; i < 6; ++i) {
-                recorder.audio(std::vector<int16_t>(1600, 100), clock100ns());
+                recorder.audio(std::vector<float>(1600, 100.0f / 32768), clock100ns());
                 Sleep(34);
             }
             recorder.stop();

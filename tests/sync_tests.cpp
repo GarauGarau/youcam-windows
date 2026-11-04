@@ -112,12 +112,12 @@ void longRecording(const std::filesystem::path &path, bool stress = false) {
         movie.video(frame, time, next - time);
         const auto audioEnd = next * 48000 / 10000000;
         while (audioSample < audioEnd) {
-            std::vector<int16_t> sound(size_t(std::min<int64_t>(4800, audioEnd - audioSample)), 0);
+            std::vector<float> sound(size_t(std::min<int64_t>(4800, audioEnd - audioSample)), 0);
             for (size_t i = 0; i < sound.size(); ++i) {
                 const auto sampleTime = (audioSample + int64_t(i)) * 10000000 / 48000;
                 for (auto cue : cues)
                     if (sampleTime >= cue && sampleTime < cue + 1000000)
-                        sound[i] = int16_t(12000 * std::sin((audioSample + int64_t(i)) *
+                        sound[i] = float((12000.0 / 32768) * std::sin((audioSample + int64_t(i)) *
                                                           6.283185307179586 * 1000 / 48000));
             }
             movie.audio(sound, audioSample * 10000000 / 48000);
@@ -136,10 +136,13 @@ void longRecording(const std::filesystem::path &path, bool stress = false) {
     std::cout << "Finalized in " << encodeSeconds << " s (" << seconds / encodeSeconds
               << "x real time); decoding all frames and audio." << std::endl;
     auto video = markers(path, false, int64_t(seconds) * 30), audio = markers(path, true);
+    auto master = markers(wavePath(path), true);
+    require(master.size() == 3, "Lossless WAV lost a synchronization marker.");
     require(video.size() == 3 && audio.size() == 3, "Long recording lost a synchronization marker.");
     for (size_t i = 0; i < video.size(); ++i) {
         require(std::abs(video[i] - cues[i]) < 400, "Video cue moved on the constant-rate timeline.");
         require(std::abs(video[i] - audio[i]) < 600000, "Audio/video synchronization drifted over time.");
+        require(std::abs(master[i] - cues[i]) < 1000, "Lossless WAV moved a cue on the timeline.");
         std::cout << "Cue " << i + 1 << " at " << cues[i] / 10000000.0 << " s: signed A/V skew "
                   << (video[i] - audio[i]) / 10000.0 << " ms\n";
     }
@@ -159,10 +162,10 @@ void segment(Recorder &recorder, Frames &frames, int64_t base, bool irregular) {
         auto now = clock100ns();
         while (base + int64_t(audioPacket + 1) * 100000 <= now) {
             auto time = base + int64_t(audioPacket) * 100000;
-            std::vector<int16_t> sound(480, 0);
+            std::vector<float> sound(480, 0);
             if (audioPacket >= 50 && audioPacket < 60)
                 for (size_t i = 0; i < sound.size(); ++i)
-                    sound[i] = int16_t(12000 * std::sin((i + audioPacket * 480) * 6.283185307179586 * 1000 / 48000));
+                    sound[i] = float((12000.0 / 32768) * std::sin((i + audioPacket * 480) * 6.283185307179586 * 1000 / 48000));
             recorder.audio(std::move(sound), time);
             ++audioPacket;
         }
@@ -189,7 +192,7 @@ int main(int argc, char **argv) {
         path = prefix.wstring() + L"-long.mp4";
         longRecording(path, stress);
         if (keep) std::cout << "Fixture: " << path << '\n';
-        else std::filesystem::remove(path);
+        else { std::filesystem::remove(path); std::filesystem::remove(wavePath(path)); }
         if (stress) {
             MFShutdown();
             return 0;
@@ -222,15 +225,18 @@ int main(int argc, char **argv) {
         recorder.stop();
         require(recorder.state().error.empty(), recorder.state().error.c_str());
         auto video = markers(path, false), audio = markers(path, true);
+        auto master = markers(wavePath(path), true);
+        require(master.size() == 2, "Lossless WAV lost a pause/resume marker.");
         require(video.size() == 2 && audio.size() == 2, "Expected two matching A/V markers, including after Resume.");
         for (size_t i = 0; i < video.size(); ++i) {
             auto skew = std::abs(video[i] - audio[i]);
             std::cout << "Marker " << i + 1 << ": A/V skew " << skew / 10000.0 << " ms\n";
             require(skew < 600000, "Camera delivery delay leaked into recorded lip sync.");
+            require(std::abs(master[i] - video[i]) < 600000, "Lossless WAV lost pause/resume synchronization.");
         }
         require(video[1] - video[0] < 14000000, "Paused time leaked into the saved video.");
         if (keep) std::cout << "Fixture: " << path << '\n';
-        else std::filesystem::remove(path);
+        else { std::filesystem::remove(path); std::filesystem::remove(wavePath(path)); }
         }
         MFShutdown();
         std::cout << "PASS: decoded 30 fps CFR and lip sync with delayed/irregular video and pause/resume.\n";
