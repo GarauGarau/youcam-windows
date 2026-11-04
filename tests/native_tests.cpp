@@ -157,8 +157,14 @@ void inspectWindowCameraMovie(const std::filesystem::path &path) {
             else buffer->Unlock();
             // Known BT.709 luma: green camera ~173, red window ~63, blue ~32.
             // A white occluding desktop window would be ~235 and must never appear.
-            require(backgroundRed > 45 && backgroundRed < 90 && backgroundBlue < 65,
-                    "An unrelated window appeared in the saved composition.");
+            if (!(backgroundRed > 45 && backgroundRed < 90 && backgroundBlue < 65)) {
+                std::ostringstream message;
+                message << "Unexpected composition background at " << timestamp << " ticks: red="
+                        << backgroundRed << ", blue=" << backgroundBlue << ", stride=" << stride
+                        << ", old camera=" << oldCamera << ", new camera=" << newCamera
+                        << ". Synthetic recording: " << narrow(path.wstring());
+                throw std::runtime_error(message.str());
+            }
             bool oldGreen = oldCamera > 140 && oldCamera < 200;
             bool newGreen = newCamera > 140 && newCamera < 200;
             bottomRight |= oldGreen;
