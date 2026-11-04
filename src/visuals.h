@@ -9,6 +9,7 @@ class Drawing {
     ~Drawing();
 };
 constexpr int ShadowMargin = 32;
+constexpr int PlainCameraShape = 4;
 constexpr double StageMinimum = .25, StageMaximum = .98;
 void drawImage(Gdiplus::Graphics &, const Frame &, Gdiplus::RectF, Crop, bool mirror, bool cover);
 Frame cameraTile(const Frame *, int width, int height, int shape, Crop, bool mirror,

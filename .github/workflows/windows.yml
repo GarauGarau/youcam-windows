@@ -22,6 +22,15 @@ jobs:
           if ($feature -and -not $feature.Installed) { Install-WindowsFeature Server-Media-Foundation }
       - name: Test native capture and full-resolution encoding
         run: ctest --test-dir build -C Release --output-on-failure -V
+      - name: Save failed test diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: YouCam-failed-tests-${{ github.run_id }}
+          path: |
+            build/Testing/Temporary/
+            ${{ runner.temp }}/YouCam native*/
+          retention-days: 7
       - name: Inspect executable dependencies
         shell: pwsh
         run: |

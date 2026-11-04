@@ -10,6 +10,7 @@ class Movie {
     bool audioEnabled_ = false;
     bool audioStarted_ = false;
     int64_t videoFrames_ = 0;
+    std::vector<uint8_t> videoBuffer_;
     AudioFormat audioFormat_;
     WaveMaster master_;
     std::filesystem::path masterPath_;
@@ -60,7 +61,7 @@ class Recorder {
         stop();
     }
     // For Stage, pass the rendered scene frames; nullptr retains WGC capture.
-    // For Camera/Window, pass the webcam's native frames.
+    // For Camera/Portrait/Window, pass the webcam's native frames.
     void start(Source, Frames *camera, bool audio, const std::filesystem::path &, AudioFormat = {});
     void stop(const std::string &error = "");
     void pause(const std::string &reason = "");

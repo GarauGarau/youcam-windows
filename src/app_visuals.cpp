@@ -4,19 +4,53 @@ namespace youcam {
 using namespace Gdiplus;
 using namespace commands;
 std::shared_ptr<const Frame> App::cameraFrame() {
-    try { return camera_.frames.get(!preview_); }
+    try {
+        auto frame = camera_.frames.get(!preview_);
+        if (!portraitMode() || !frame) {
+            portraitInput_.reset();
+            portraitFrame_.reset();
+            return frame;
+        }
+        int turns = portraitTurns(frame->width, frame->height, portraitReverse_);
+        if (!turns) {
+            portraitInput_.reset();
+            portraitFrame_.reset();
+            return frame;
+        }
+        if (frame != portraitInput_ || turns != portraitTurns_) {
+            portraitFrame_ = std::make_shared<Frame>(rotateFrame(*frame, turns));
+            portraitInput_ = frame;
+            portraitTurns_ = turns;
+        }
+        return portraitFrame_;
+    }
     catch (const std::exception &e) { cameraError_ = e.what(); return {}; }
+}
+double App::cameraAspect(const Frame *frame) const {
+    if (!portraitMode()) return shape_ == 2 ? 16.0 / 9.0 : 1.0;
+    if (!frame) return 9.0 / 16.0;
+    auto region = cropPixels(frame->width, frame->height, portraitCrop_);
+    return double(region.width) / region.height;
 }
 void App::renderCamera() {
     if (!overlay_) return;
     auto frame = cameraFrame();
     int width = cameraWidth_;
-    int height = shape_ == 2 ? width * 9 / 16 : width;
+    int height = std::max(1, int(width / cameraAspect(frame.get())));
+    if (portraitMode()) {
+        RECT current{};
+        GetWindowRect(overlay_, &current);
+        if (rectWidth(current) != width + 2 * ShadowMargin || rectHeight(current) != height + 2 * ShadowMargin) {
+            resizeCamera(width);
+            return;
+        }
+    }
     if (windowCameraActive() && rectWidth(windowPreviewRect_) > 0) {
         width = rectWidth(windowPreviewRect_);
         height = rectHeight(windowPreviewRect_);
     }
-    auto image = cameraTile(frame.get(), width, height, shape_, crop_, mirrored_,
+    auto image = cameraTile(frame.get(), width, height, portraitMode() ? PlainCameraShape : shape_,
+                            cameraCrop(), cameraMirror(),
                             cameraError_.empty() ? L"Starting camera…" : wide(cameraError_));
     updateLayer(overlay_, image);
 }
@@ -149,8 +183,9 @@ void App::leaveStage() {
     source_ = beforeStage_;
     cameraVisible_ = cameraBeforeStage_;
     ShowWindow(overlay_, cameraVisible_ ? SW_SHOWNOACTIVATE : SW_HIDE);
-    if (!cameraVisible_ && source_.kind != SourceKind::Camera && !windowCameraActive() && !preview_)
+    if (!cameraVisible_ && !cameraSource(source_.kind) && !windowCameraActive() && !preview_)
         camera_.shutdown();
+    resizeCamera(cameraWidth_);
     showEditor();
 }
 void App::paintStage(HDC dc) {
@@ -175,7 +210,7 @@ void App::beginCrop() {
     if (cropping_ || !allowSourceChange()) return;
     auto frame = cameraFrame();
     if (!frame) { error("Wait for the camera before cropping."); return; }
-    pendingCrop_ = mirrored_ ? mirroredCrop(crop_) : crop_;
+    pendingCrop_ = cameraMirror() ? mirroredCrop(cameraCrop()) : cameraCrop();
     MONITORINFO info{sizeof(info)};
     GetMonitorInfoW(MonitorFromWindow(source_.kind == SourceKind::Stage ? stage_ : overlay_,
                                      MONITOR_DEFAULTTONEAREST), &info);
@@ -197,7 +232,7 @@ void App::beginCrop() {
 void App::finishCrop(bool apply, bool full) {
     if (!cropping_) return;
     if (apply) {
-        crop_ = full ? Crop{} : validCrop(mirrored_ ? mirroredCrop(pendingCrop_) : pendingCrop_);
+        cameraCrop() = full ? Crop{} : validCrop(cameraMirror() ? mirroredCrop(pendingCrop_) : pendingCrop_);
         saveSettings();
     }
     ReleaseCapture();
@@ -205,7 +240,7 @@ void App::finishCrop(bool apply, bool full) {
     ShowWindow(cropEditor_, SW_HIDE);
     for (HWND window : {overlay_, panel_, stage_}) EnableWindow(window, TRUE);
     if (source_.kind == SourceKind::Stage) SetForegroundWindow(stage_);
-    else renderCamera();
+    else resizeCamera(cameraWidth_);
     update();
 }
 void App::paintCrop(HDC dc) {
@@ -229,7 +264,7 @@ void App::paintCrop(HDC dc) {
             cropImage_ = {(client.right - w) / 2, 48 + (client.bottom - 120 - h) / 2,
                            (client.right + w) / 2, 48 + (client.bottom - 120 + h) / 2};
             RectF imageRect(float(cropImage_.left), float(cropImage_.top), float(w), float(h));
-            drawImage(g, *frame, imageRect, {}, mirrored_, false);
+            drawImage(g, *frame, imageRect, {}, cameraMirror(), false);
             RectF selected(float(cropImage_.left + pendingCrop_.left * w),
                             float(cropImage_.top + pendingCrop_.top * h),
                             float((pendingCrop_.right - pendingCrop_.left) * w),

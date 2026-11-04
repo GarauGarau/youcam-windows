@@ -197,8 +197,8 @@ int main(int argc, char **argv) {
             MFShutdown();
             return 0;
         }
-        for (bool irregular : {false, true}) for (auto kind : {SourceKind::Camera, SourceKind::Stage}) {
-        path = prefix.wstring() + (kind == SourceKind::Camera ? L"-camera" : L"-stage") +
+        for (bool irregular : {false, true}) for (auto kind : {SourceKind::Camera, SourceKind::Portrait, SourceKind::Stage}) {
+        path = prefix.wstring() + (kind == SourceKind::Camera ? L"-camera" : kind == SourceKind::Portrait ? L"-portrait" : L"-stage") +
                (irregular ? L"-irregular.mp4" : L"-regular.mp4");
         Frames frames;
         Frame initial(64, 48);

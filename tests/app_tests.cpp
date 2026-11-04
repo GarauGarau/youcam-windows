@@ -67,7 +67,9 @@ struct AppTest {
         std::cout << "PASS: app camera switching, remembered selection, restart and shutdown." << std::endl;
     }
     static void run() {
-        App app(GetModuleHandleW(nullptr), true);
+        auto settings = std::filesystem::temp_directory_path() /
+                        (L"YouCam-ui-" + std::to_wstring(GetCurrentProcessId()) + L".ini");
+        App app(GetModuleHandleW(nullptr), true, settings.wstring());
         app.crop_ = {};
         app.mirrored_ = true;
         app.stageScale_ = .68;
@@ -195,9 +197,88 @@ struct AppTest {
         require(!app.windowCameraActive() && !app.windowCameraAttached_ && sameRect(restored, floating),
                 "Disabling composition must restore the original floating camera geometry.");
         DestroyWindow(fixture);
+        app.crop_ = {.2, .1, .8, .9};
+        const auto normalCrop = app.crop_;
+        app.command(commands::CameraPortrait);
+        pump(50);
+        require(app.portraitMode() && app.portraitCrop_.full() && !app.cameraMirror(),
+                "Vertical camera must start with an independent full crop and no mirror.");
+        auto portrait = app.cameraFrame();
+        require(portrait && portrait->width == 720 && portrait->height == 1280,
+                "Portrait preview must rotate the native landscape frame.");
+        RECT portraitRect{};
+        GetWindowRect(app.overlay_, &portraitRect);
+        require(std::abs(double(rectWidth(portraitRect) - 2 * ShadowMargin) /
+                         (rectHeight(portraitRect) - 2 * ShadowMargin) - 9.0 / 16.0) < .005,
+                "Portrait preview must show the recorded frame's proportions.");
+        auto normalShape = app.shape_;
+        app.command(commands::ShapeBase + (normalShape + 1) % 3);
+        app.command(commands::Mirror);
+        require(app.shape_ == normalShape && app.mirrored_, "Portrait mode must ignore shape and mirror controls.");
+        app.command(commands::CropCamera);
+        pump(40);
+        require(rectHeight(app.cropImage_) > rectWidth(app.cropImage_), "Crop editor must show upright portrait pixels.");
+        app.pendingCrop_ = {.1, .2, .7, .9};
+        app.command(commands::CropApply);
+        require(app.portraitCrop_.left == .1 && app.portraitCrop_.right == .7 &&
+                app.crop_.left == normalCrop.left, "Portrait crop must not be mirrored or alter other modes.");
+        app.command(commands::PortraitReverse);
+        require(app.portraitReverse_ && std::abs(app.portraitCrop_.left - .3) < .001 &&
+                std::abs(app.portraitCrop_.top - .1) < .001,
+                "Changing orientation must retain the selected physical region.");
+        require(app.cameraFrame()->bgra == rotateFrame(*portrait, 2).bgra, "Reverse must update cached preview pixels.");
+        app.command(commands::CropCamera);
+        app.pendingCrop_ = {};
+        app.command(commands::CropCancel);
+        require(!app.portraitCrop_.full(), "Cancel must preserve the portrait crop.");
+        app.command(commands::CropCamera);
+        app.command(commands::CropFull);
+        require(app.portraitCrop_.full(), "Full frame must restore the complete portrait image.");
+        app.command(commands::PortraitReverse);
+        Frame nativePortrait(180, 320);
+        nativePortrait.bgra[0] = 77;
+        app.camera_.frames.put(std::move(nativePortrait));
+        pump(40);
+        auto upright = app.cameraFrame();
+        require(upright->width == 180 && upright->height == 320 && upright->bgra[0] == 77,
+                "Native portrait frames must stay in their original orientation.");
+        app.command(commands::HideCamera);
+        require(!IsWindowVisible(app.overlay_) && app.camera_.frames.get(),
+                "Hiding portrait preview must keep the recording source alive.");
+        app.command(commands::HideCamera);
+        app.command(commands::CameraOnly);
+        require(app.crop_.left == normalCrop.left && app.crop_.right == normalCrop.right,
+                "Leaving portrait mode must restore the original camera crop.");
+        std::cout << "PASS: portrait source, preview aspect, rotation, independent crop, apply/cancel/reset and hide.\n";
         std::cout << "PASS: window camera anchoring, move/resize, preview hiding, minimize/restore and opt-out.\n";
         std::cout << "PASS: double click, crop drag, mirror, apply/cancel/reset, F11/Esc, wheel, "
                      "control exclusion and actual stage recording.\n";
+    }
+    static void portraitSettings() {
+        auto path = std::filesystem::temp_directory_path() /
+                    (L"YouCam-portrait-settings-" + std::to_wstring(GetCurrentProcessId()) + L".ini");
+        struct Cleanup {
+            std::filesystem::path path;
+            ~Cleanup() { std::error_code ignored; std::filesystem::remove(path, ignored); }
+        } cleanup{path};
+        {
+            App app(GetModuleHandleW(nullptr), true, path.wstring());
+            app.command(commands::CameraPortrait);
+            app.portraitReverse_ = true;
+            app.portraitCrop_ = {.1, .2, .8, .9};
+            app.crop_ = {.3, .1, .7, .9};
+            // Only settings persistence is enabled; capture stays synthetic.
+            app.preview_ = false;
+            app.saveSettings();
+            app.preview_ = true;
+        }
+        {
+            App app(GetModuleHandleW(nullptr), true, path.wstring());
+            require(app.portraitMode() && app.portraitReverse_ && app.portraitCrop_.left == .1 &&
+                    app.portraitCrop_.bottom == .9 && app.crop_.left == .3,
+                    "Restart must restore portrait source, direction and independent crops.");
+        }
+        std::cout << "PASS: portrait settings survive restart.\n";
     }
 };
 }
@@ -210,8 +291,10 @@ int main(int argc, char **argv) {
         youcam::check(MFStartup(MF_VERSION), "Initialize multimedia");
         if (argc > 1 && std::string(argv[1]) == "--camera-switch")
             youcam::AppTest::hardwareCameraSwitch();
-        else
+        else {
             youcam::AppTest::run();
+            youcam::AppTest::portraitSettings();
+        }
         MFShutdown();
         winrt::uninit_apartment();
         return 0;

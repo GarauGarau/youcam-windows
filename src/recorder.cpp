@@ -127,13 +127,13 @@ void Movie::video(const Frame &frame, int64_t timestamp, int64_t duration) {
     if (endFrame <= videoFrames_)
         return;
     // Convert once even when this image covers multiple output frames.
-    auto nv12 = toNV12(frame);
+    toNV12(frame, videoBuffer_);
     while (videoFrames_ < endFrame) {
         // Use rational endpoints, not accumulated 333333-tick durations. Round
         // up to 100 ns so MP4 timescale conversion does not put frames early.
         const auto time = (videoFrames_ * 10000000 + 29) / 30;
         const auto next = ((videoFrames_ + 1) * 10000000 + 29) / 30;
-        sample(video_, nv12.data(), nv12.size(), time, next - time);
+        sample(video_, videoBuffer_.data(), videoBuffer_.size(), time, next - time);
         ++videoFrames_;
     }
 }
@@ -296,7 +296,7 @@ void Recorder::run(Source source, Frames *camera, bool withAudio, std::filesyste
             drawing = std::make_unique<Drawing>();
         Frames *frames = camera;
         const bool directStage = source.kind == SourceKind::Stage && camera;
-        if (source.kind != SourceKind::Camera && !directStage) {
+        if (!cameraSource(source.kind) && !directStage) {
             capture.start(source);
             frames = capture.frames.get();
         }
@@ -304,7 +304,7 @@ void Recorder::run(Source source, Frames *camera, bool withAudio, std::filesyste
             throw std::runtime_error("No camera source is available.");
         std::shared_ptr<const Frame> first;
         auto deadline = clock100ns() + 50000000;
-        while (!(first = frames->get(source.kind == SourceKind::Camera || directStage))) {
+        while (!(first = frames->get(cameraSource(source.kind) || directStage))) {
             {
                 std::lock_guard lock(mutex_);
                 if (stop_)
@@ -314,8 +314,11 @@ void Recorder::run(Source source, Frames *camera, bool withAudio, std::filesyste
                 throw std::runtime_error("No full-resolution frame arrived from the selected source.");
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
-        auto region = cropPixels(first->width, first->height,
-                                 source.kind == SourceKind::Camera ? source.crop : Crop{});
+        const int turns = source.kind == SourceKind::Portrait
+                            ? portraitTurns(first->width, first->height, source.portraitReverse) : 0;
+        auto region = cropPixels(turns % 2 ? first->height : first->width,
+                                 turns % 2 ? first->width : first->height,
+                                 cameraSource(source.kind) ? source.crop : Crop{});
         auto width = evenExtent(region.width), height = evenExtent(region.height);
         movie.start(path, width, height, withAudio, audioFormat_);
         {
@@ -368,7 +371,7 @@ void Recorder::run(Source source, Frames *camera, bool withAudio, std::filesyste
             const auto frameNumber = elapsed * 30 / 10000000;
             if (frameNumber < nextFrame)
                 continue;
-            auto frame = frames->get(source.kind == SourceKind::Camera || directStage);
+            auto frame = frames->get(cameraSource(source.kind) || directStage);
             if (!frame)
                 continue;
             nextFrame = frameNumber + 1;
@@ -376,29 +379,31 @@ void Recorder::run(Source source, Frames *camera, bool withAudio, std::filesyste
                 (frame->width != first->width || frame->height != first->height))
                 throw std::runtime_error(
                     "The source resolution changed. Start a new recording to use the new native resolution.");
-            Frame fitted;
-            Frame cropped;
-            Frame composited;
+            Frame transformed;
             const Frame *pixels = frame.get();
+            if (turns) {
+                transformed = rotateFrame(*pixels, turns);
+                pixels = &transformed;
+            }
             if (source.kind == SourceKind::Window && overlay.enabled) {
                 auto cameraFrame = camera ? camera->get(true) : nullptr;
                 if (!cameraFrame)
                     throw std::runtime_error("No live webcam frame is available for window + camera recording.");
-                composited = composeWindow(*frame, *cameraFrame, overlay);
-                pixels = &composited;
+                transformed = composeWindow(*frame, *cameraFrame, overlay);
+                pixels = &transformed;
             }
-            if (source.kind == SourceKind::Camera && !source.crop.full()) {
-                cropped = cropFrame(*frame, source.crop);
-                pixels = &cropped;
+            if (cameraSource(source.kind) && !source.crop.full()) {
+                transformed = cropFrame(*pixels, source.crop);
+                pixels = &transformed;
             }
             if (pixels->width != width || pixels->height != height || source.mirror) {
-                fitted = fitFrame(*pixels, width, height, source.mirror);
-                pixels = &fitted;
+                transformed = fitFrame(*pixels, width, height, source.mirror);
+                pixels = &transformed;
             }
             // Camera and composed-camera images must share the microphone's
             // capture clock. Assigning the encoder's current time here shifts
             // speech by the entire camera/decode/render delay.
-            bool timedCamera = source.kind == SourceKind::Camera || directStage ||
+            bool timedCamera = cameraSource(source.kind) || directStage ||
                                (source.kind == SourceKind::Window && overlay.enabled);
             int64_t videoTime = frameNumber * 10000000 / 30;
             if (timedCamera && pixels->capturedAt) {
@@ -417,9 +422,7 @@ void Recorder::run(Source source, Frames *camera, bool withAudio, std::filesyste
             // Wait for the next capture timestamp before resampling this
             // interval. Using delivery time would bake camera latency into lip sync.
             if (pixels == frame.get()) pendingVideo = frame;
-            else if (pixels == &fitted) pendingVideo = std::make_shared<Frame>(std::move(fitted));
-            else if (pixels == &cropped) pendingVideo = std::make_shared<Frame>(std::move(cropped));
-            else pendingVideo = std::make_shared<Frame>(std::move(composited));
+            else pendingVideo = std::make_shared<Frame>(std::move(transformed));
             pendingTime = videoTime;
         }
     } catch (const std::exception &error) {

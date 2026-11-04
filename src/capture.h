@@ -1,7 +1,8 @@
 #pragma once
 #include "common.h"
 namespace youcam {
-enum class SourceKind { Screen, Region, Window, Camera, Stage };
+enum class SourceKind { Screen, Region, Window, Camera, Stage, Portrait };
+inline bool cameraSource(SourceKind kind) { return kind == SourceKind::Camera || kind == SourceKind::Portrait; }
 inline bool windowSource(SourceKind kind) { return kind == SourceKind::Window || kind == SourceKind::Stage; }
 struct Source {
     SourceKind kind = SourceKind::Screen;
@@ -12,6 +13,7 @@ struct Source {
     bool mirror = false;
     Crop crop;
     CameraOverlay cameraOverlay;
+    bool portraitReverse = false;
 };
 struct Monitor {
     HMONITOR handle;
